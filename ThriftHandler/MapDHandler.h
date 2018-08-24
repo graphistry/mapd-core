@@ -28,40 +28,48 @@
 #ifdef HAVE_PROFILER
 #include <gperftools/heap-profiler.h>
 #endif  // HAVE_PROFILER
-#include <thrift/concurrency/ThreadManager.h>
 #include <thrift/concurrency/PlatformThreadFactory.h>
+#include <thrift/concurrency/ThreadManager.h>
 #include <thrift/protocol/TBinaryProtocol.h>
 #include <thrift/protocol/TJSONProtocol.h>
-#include <thrift/server/TThreadPoolServer.h>
 #include <thrift/server/TThreadedServer.h>
+#include <thrift/transport/TBufferTransports.h>
 #include <thrift/transport/THttpServer.h>
 #include <thrift/transport/TServerSocket.h>
-#include <thrift/transport/TBufferTransports.h>
 
 #include "MapDRelease.h"
 
 #include "Calcite/Calcite.h"
-
 #include "Catalog/Catalog.h"
+#include "DataMgr/LockMgr.h"
 #include "Fragmenter/InsertOrderFragmenter.h"
 #include "Import/Importer.h"
-#include "Parser/parser.h"
 #include "Parser/ParserWrapper.h"
 #include "Parser/ReservedKeywords.h"
+#include "Parser/parser.h"
 #include "Planner/Planner.h"
 #include "QueryEngine/CalciteAdapter.h"
 #include "QueryEngine/Execute.h"
-#include "QueryEngine/GpuMemUtils.h"
 #include "QueryEngine/ExtensionFunctionsWhitelist.h"
+#include "QueryEngine/GpuMemUtils.h"
 #include "QueryEngine/JsonAccessors.h"
 #include "QueryEngine/TableGenerations.h"
+#include "Shared/ConfigResolve.h"
+#include "Shared/MapDParameters.h"
+#include "Shared/StringTransform.h"
 #include "Shared/geosupport.h"
 #include "Shared/mapd_shared_mutex.h"
+#include "Shared/mapd_shared_ptr.h"
 #include "Shared/measure.h"
 #include "Shared/scope.h"
-#include "Shared/StringTransform.h"
-#include "Shared/MapDParameters.h"
 
+#include <fcntl.h>
+#include <glog/logging.h>
+#include <signal.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/trim.hpp>
@@ -70,24 +78,24 @@
 #include <boost/program_options.hpp>
 #include <boost/regex.hpp>
 #include <boost/tokenizer.hpp>
-#include <memory>
-#include <string>
-#include <fstream>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <random>
-#include <map>
 #include <cmath>
-#include <typeinfo>
-#include <thread>
-#include <glog/logging.h>
-#include <signal.h>
-#include <unistd.h>
-#include <fcntl.h>
+#include <fstream>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <random>
 #include <regex>
-
+#include <string>
+#include <thread>
+#include <typeinfo>
+#include <unordered_map>
 #include "gen-cpp/MapD.h"
+
+class MapDRenderHandler;
+class MapDAggHandler;
+class MapDLeafHandler;
+
+enum GetTablesType { GET_PHYSICAL_TABLES_AND_VIEWS, GET_PHYSICAL_TABLES, GET_VIEWS };
 
 typedef std::map<TSessionId, std::shared_ptr<Catalog_Namespace::SessionInfo>> SessionMap;
 
@@ -102,39 +110,85 @@ class MapDHandler : public MapDIf {
               const bool read_only,
               const bool allow_loop_joins,
               const bool enable_rendering,
-              const size_t cpu_buffer_mem_bytes,
               const size_t render_mem_bytes,
               const int num_gpus,
               const int start_gpu,
               const size_t reserved_gpu_mem,
               const size_t num_reader_threads,
-              const std::string& start_epoch_table_name,
-              const int start_epoch,
-              const bool is_decr_start_epoch,
-              const LdapMetadata ldapMetadata,
+              const AuthMetadata authMetadata,
               const MapDParameters& mapd_parameters,
               const std::string& db_convert_dir,
               const bool legacy_syntax,
-              const bool access_priv_check);
+              const bool access_priv_check,
+              const int idle_session_duration,
+              const int max_session_duration);
 
   ~MapDHandler();
 
-  void connect(TSessionId& session, const std::string& user, const std::string& passwd, const std::string& dbname);
-  void internal_connect(TSessionId& session, const std::string& user, const std::string& dbname);
-  void connectImpl(TSessionId& session,
-                   const std::string& user,
-                   const std::string& passwd,
-                   const std::string& dbname,
-                   Catalog_Namespace::UserMetadata& user_meta);
+  static inline size_t max_bytes_for_thrift() { return 2 * 1000 * 1000 * 1000L; }
+
+  // Important ****
+  //         This block must be keep in sync with mapd.thrift and HAHandler.h
+  //         Please keep in same order for easy check and cut and paste
+  // Important ****
+
+  // connection, admin
+  void connect(TSessionId& session,
+               const std::string& user,
+               const std::string& passwd,
+               const std::string& dbname);
   void disconnect(const TSessionId& session);
-  void interrupt(const TSessionId& session);
   void get_server_status(TServerStatus& _return, const TSessionId& session);
+  void get_status(std::vector<TServerStatus>& _return, const TSessionId& session);
+  void get_hardware_info(TClusterHardwareInfo& _return, const TSessionId& session);
+
+  bool hasTableAccessPrivileges(const TableDescriptor* td, const TSessionId& session);
+  void get_tables(std::vector<std::string>& _return, const TSessionId& session);
+  void get_physical_tables(std::vector<std::string>& _return, const TSessionId& session);
+  void get_views(std::vector<std::string>& _return, const TSessionId& session);
+  void get_tables_meta(std::vector<TTableMeta>& _return, const TSessionId& session);
+  void get_table_details(TTableDetails& _return,
+                         const TSessionId& session,
+                         const std::string& table_name);
+  void get_internal_table_details(TTableDetails& _return,
+                                  const TSessionId& session,
+                                  const std::string& table_name);
+  void get_users(std::vector<std::string>& _return, const TSessionId& session);
+  void get_databases(std::vector<TDBInfo>& _return, const TSessionId& session);
+
+  void get_version(std::string& _return);
+  void start_heap_profile(const TSessionId& session);
+  void stop_heap_profile(const TSessionId& session);
+  void get_heap_profile(std::string& _return, const TSessionId& session);
+  void get_memory(std::vector<TNodeMemoryInfo>& _return,
+                  const TSessionId& session,
+                  const std::string& memory_level);
+  void clear_cpu_memory(const TSessionId& session);
+  void clear_gpu_memory(const TSessionId& session);
+  void set_table_epoch(const TSessionId& session,
+                       const int db_id,
+                       const int table_id,
+                       const int new_epoch);
+  void set_table_epoch_by_name(const TSessionId& session,
+                               const std::string& table_name,
+                               const int new_epoch);
+  int32_t get_table_epoch(const TSessionId& session,
+                          const int32_t db_id,
+                          const int32_t table_id);
+  int32_t get_table_epoch_by_name(const TSessionId& session,
+                                  const std::string& table_name);
+  // query, render
   void sql_execute(TQueryResult& _return,
                    const TSessionId& session,
                    const std::string& query,
                    const bool column_format,
                    const std::string& nonce,
-                   const int32_t first_n);
+                   const int32_t first_n,
+                   const int32_t at_most_n);
+  void get_completion_hints(std::vector<TCompletionHint>& hints,
+                            const TSessionId& session,
+                            const std::string& sql,
+                            const int cursor);
   // TODO(miyu): merge the following two data frame APIs.
   void sql_execute_df(TDataFrame& _return,
                       const TSessionId& session,
@@ -147,38 +201,103 @@ class MapDHandler : public MapDIf {
                        const std::string& query,
                        const int32_t device_id,
                        const int32_t first_n);
-  void sql_validate(TTableDescriptor& _return, const TSessionId& session, const std::string& query);
-  void get_table_descriptor(TTableDescriptor& _return, const TSessionId& session, const std::string& table_name);
-  void get_row_descriptor(TRowDescriptor& _return, const TSessionId& session, const std::string& table_name);
-  void get_frontend_view(TFrontendView& _return, const TSessionId& session, const std::string& view_name);
-  void delete_frontend_view(const TSessionId& session, const std::string& view_name);
-  void get_tables(std::vector<std::string>& _return, const TSessionId& session);
-  void get_users(std::vector<std::string>& _return, const TSessionId& session);
-  void get_databases(std::vector<TDBInfo>& _return, const TSessionId& session);
-  void get_frontend_views(std::vector<TFrontendView>& _return, const TSessionId& session);
+  void deallocate_df(const TSessionId& session,
+                     const TDataFrame& df,
+                     const TDeviceType::type device_type,
+                     const int32_t device_id);
+  void interrupt(const TSessionId& session);
+  void sql_validate(TTableDescriptor& _return,
+                    const TSessionId& session,
+                    const std::string& query);
   void set_execution_mode(const TSessionId& session, const TExecuteMode::type mode);
-  void get_version(std::string& _return);
-  void get_memory_gpu(std::string& _return, const TSessionId& session);
-  void get_memory_cpu(std::string& memory, const TSessionId& session);
-  void get_memory_summary(TMemorySummary& _return, const TSessionId& session);
-  void load_table_binary(const TSessionId& session, const std::string& table_name, const std::vector<TRow>& rows);
-  void load_table(const TSessionId& session, const std::string& table_name, const std::vector<TStringRow>& rows);
-  void render(TRenderResult& _return,
-              const TSessionId& session,
-              const std::string& query,
-              const std::string& render_type,
-              const std::string& nonce);
   void render_vega(TRenderResult& _return,
                    const TSessionId& session,
                    const int64_t widget_id,
                    const std::string& vega_json,
                    const int32_t compression_level,
                    const std::string& nonce);
+  void get_result_row_for_pixel(
+      TPixelTableRowResult& _return,
+      const TSessionId& session,
+      const int64_t widget_id,
+      const TPixel& pixel,
+      const std::map<std::string, std::vector<std::string>>& table_col_names,
+      const bool column_format,
+      const int32_t pixel_radius,
+      const std::string& nonce);
+  // Immerse
+  void get_frontend_view(TFrontendView& _return,
+                         const TSessionId& session,
+                         const std::string& view_name);
+  void get_frontend_views(std::vector<TFrontendView>& _return, const TSessionId& session);
   void create_frontend_view(const TSessionId& session,
                             const std::string& view_name,
                             const std::string& view_state,
                             const std::string& image_hash,
                             const std::string& view_metadata);
+  void delete_frontend_view(const TSessionId& session, const std::string& view_name);
+
+  // dashboards
+  void get_dashboard(TDashboard& _return,
+                     const TSessionId& session,
+                     int32_t dashboard_id);
+  void get_dashboards(std::vector<TDashboard>& _return, const TSessionId& session);
+  int32_t create_dashboard(const TSessionId& session,
+                           const std::string& dashboard_name,
+                           const std::string& dashboard_state,
+                           const std::string& image_hash,
+                           const std::string& dashboard_metadata);
+  void replace_dashboard(const TSessionId& session,
+                         const int32_t dashboard_id,
+                         const std::string& dashboard_name,
+                         const std::string& dashboard_owner,
+                         const std::string& dashboard_state,
+                         const std::string& image_hash,
+                         const std::string& dashboard_metadata);
+  void delete_dashboard(const TSessionId& session, const int32_t dashboard_id);
+  void share_dashboard(const TSessionId& session,
+                       const int32_t dashboard_id,
+                       const std::vector<std::string>& groups,
+                       const std::vector<std::string>& objects,
+                       const TDashboardPermissions& permissions);
+  void unshare_dashboard(const TSessionId& session,
+                         const int32_t dashboard_id,
+                         const std::vector<std::string>& groups,
+                         const std::vector<std::string>& objects,
+                         const TDashboardPermissions& permissions);
+  void get_dashboard_grantees(std::vector<TDashboardGrantees>& _return,
+                              const TSessionId& session,
+                              int32_t dashboard_id);
+
+  void get_link_view(TFrontendView& _return,
+                     const TSessionId& session,
+                     const std::string& link);
+  void create_link(std::string& _return,
+                   const TSessionId& session,
+                   const std::string& view_state,
+                   const std::string& view_metadata);
+  // import
+  void load_table_binary(const TSessionId& session,
+                         const std::string& table_name,
+                         const std::vector<TRow>& rows);
+
+  void prepare_columnar_loader(
+      const Catalog_Namespace::SessionInfo& session_info,
+      const std::string& table_name,
+      size_t num_cols,
+      std::unique_ptr<Importer_NS::Loader>* loader,
+      std::vector<std::unique_ptr<Importer_NS::TypedImportBuffer>>* import_buffers);
+
+  void load_table_binary_columnar(const TSessionId& session,
+                                  const std::string& table_name,
+                                  const std::vector<TColumn>& cols);
+  void load_table_binary_arrow(const TSessionId& session,
+                               const std::string& table_name,
+                               const std::string& arrow_stream);
+
+  void load_table(const TSessionId& session,
+                  const std::string& table_name,
+                  const std::vector<TStringRow>& rows);
   void detect_column_types(TDetectResult& _return,
                            const TSessionId& session,
                            const std::string& file_name,
@@ -186,50 +305,29 @@ class MapDHandler : public MapDIf {
   void create_table(const TSessionId& session,
                     const std::string& table_name,
                     const TRowDescriptor& row_desc,
-                    const TTableType::type table_type);
+                    const TTableType::type table_type,
+                    const TCreateParams& create_params);
   void import_table(const TSessionId& session,
                     const std::string& table_name,
                     const std::string& file_name,
                     const TCopyParams& copy_params);
-  void import_table_status(TImportStatus& _return, const TSessionId& session, const std::string& import_id);
-  void get_link_view(TFrontendView& _return, const TSessionId& session, const std::string& link);
-  void create_link(std::string& _return,
-                   const TSessionId& session,
-                   const std::string& view_state,
-                   const std::string& view_metadata);
-  void get_rows_for_pixels(TPixelResult& _return,
-                           const TSessionId& session,
-                           const int64_t widget_id,
-                           const std::vector<TPixel>& pixels,
-                           const std::string& table_name,
-                           const std::vector<std::string>& col_names,
-                           const bool column_format,
-                           const std::string& nonce);
-  void get_row_for_pixel(TPixelRowResult& _return,
-                         const TSessionId& session,
-                         const int64_t widget_id,
-                         const TPixel& pixel,
-                         const std::string& table_name,
-                         const std::vector<std::string>& col_names,
-                         const bool column_format,
-                         const int32_t pixelRadius,
-                         const std::string& nonce);
-  void get_result_row_for_pixel(TPixelTableRowResult& _return,
-                                const TSessionId& session,
-                                const int64_t widget_id,
-                                const TPixel& pixel,
-                                const std::map<std::string, std::vector<std::string>>& table_col_names,
-                                const bool column_format,
-                                const int32_t pixelRadius,
-                                const std::string& nonce);
-  void start_heap_profile(const TSessionId& session);
-  void stop_heap_profile(const TSessionId& session);
-  void get_heap_profile(std::string& _return, const TSessionId& session);
   void import_geo_table(const TSessionId& session,
                         const std::string& table_name,
                         const std::string& file_name,
                         const TCopyParams& copy_params,
                         const TRowDescriptor& row_desc);
+  void import_table_status(TImportStatus& _return,
+                           const TSessionId& session,
+                           const std::string& import_id);
+  void get_first_geo_file_in_archive(std::string& _return,
+                                     const TSessionId& session,
+                                     const std::string& archive_path,
+                                     const TCopyParams& copy_params);
+  void get_all_files_in_archive(std::vector<std::string>& _return,
+                                const TSessionId& session,
+                                const std::string& archive_path,
+                                const TCopyParams& copy_params);
+  // distributed
   void start_query(TPendingQuery& _return,
                    const TSessionId& session,
                    const std::string& query_ra,
@@ -238,23 +336,65 @@ class MapDHandler : public MapDIf {
   void broadcast_serialized_rows(const std::string& serialized_rows,
                                  const TRowDescriptor& row_desc,
                                  const TQueryId query_id);
+
+  void start_render_query(TPendingRenderQuery& _return,
+                          const TSessionId& session,
+                          const int64_t widget_id,
+                          const int16_t node_idx,
+                          const std::string& vega_json);
+  void execute_next_render_step(TRenderStepResult& _return,
+                                const TPendingRenderQuery& pending_render,
+                                const TRenderAggDataMap& merged_data);
+
   void insert_data(const TSessionId& session, const TInsertData& insert_data);
-  void render_vega_raw_pixels(TRawPixelDataResult& _return,
-                              const TSessionId& session,
-                              const int64_t widget_id,
-                              const int16_t node_idx,
-                              const std::string& vega_json);
   void checkpoint(const TSessionId& session, const int32_t db_id, const int32_t table_id);
-  void get_table_details(TTableDetails& _return, const TSessionId& session, const std::string& table_name);
-  void get_internal_table_details(TTableDetails& _return, const TSessionId& session, const std::string& table_name);
-  void clear_gpu_memory(const TSessionId& session);
-  void clear_cpu_memory(const TSessionId& session);
+  // deprecated
+  void get_table_descriptor(TTableDescriptor& _return,
+                            const TSessionId& session,
+                            const std::string& table_name);
+  void get_row_descriptor(TRowDescriptor& _return,
+                          const TSessionId& session,
+                          const std::string& table_name);
+  // DB Object Privileges
+  void get_roles(std::vector<std::string>& _return, const TSessionId& session);
+  void get_db_objects_for_grantee(std::vector<TDBObject>& _return,
+                                  const TSessionId& session,
+                                  const std::string& roleName);
+  void get_db_object_privs(std::vector<TDBObject>& _return,
+                           const TSessionId& session,
+                           const std::string& objectName,
+                           const TDBObjectType::type type);
+  void get_all_roles_for_user(std::vector<std::string>& _return,
+                              const TSessionId& session,
+                              const std::string& userName);
+  std::vector<std::string> get_valid_groups(const TSessionId& session,
+                                            int32_t dashboard_id,
+                                            std::vector<std::string> groups);
+  // licensing
+  void set_license_key(TLicenseInfo& _return,
+                       const TSessionId& session,
+                       const std::string& key,
+                       const std::string& nonce);
+  void get_license_claims(TLicenseInfo& _return,
+                          const TSessionId& session,
+                          const std::string& nonce);
+  void close_calcite_server();
+  // end of sync block for HAHandler and mapd.thrift
+
   TSessionId getInvalidSessionId() const;
 
-  std::unique_ptr<Catalog_Namespace::SysCatalog> sys_cat_;
+  void internal_connect(TSessionId& session,
+                        const std::string& user,
+                        const std::string& dbname);
+  void connectImpl(TSessionId& session,
+                   const std::string& user,
+                   const std::string& passwd,
+                   const std::string& dbname,
+                   Catalog_Namespace::UserMetadata& user_meta,
+                   std::shared_ptr<Catalog_Namespace::Catalog> cat);
+
   std::shared_ptr<Data_Namespace::DataMgr> data_mgr_;
   std::map<TSessionId, std::shared_ptr<Catalog_Namespace::SessionInfo>> sessions_;
-  std::map<std::string, std::shared_ptr<Catalog_Namespace::Catalog>> cat_map_;
 
   LeafAggregator leaf_aggregator_;
   const std::vector<LeafHostInfo> string_leaves_;
@@ -272,21 +412,38 @@ class MapDHandler : public MapDIf {
   std::mutex render_mutex_;
   int64_t start_time_;
   const MapDParameters& mapd_parameters_;
-  bool enable_rendering_;
+  std::unique_ptr<MapDRenderHandler> render_handler_;
+  std::unique_ptr<MapDAggHandler> agg_handler_;
+  std::unique_ptr<MapDLeafHandler> leaf_handler_;
   std::shared_ptr<Calcite> calcite_;
   const bool legacy_syntax_;
   Catalog_Namespace::SessionInfo get_session(const TSessionId& session);
 
  private:
+  void check_table_load_privileges(const TSessionId& session,
+                                   const std::string& table_name);
+  void check_table_load_privileges(const Catalog_Namespace::SessionInfo& session_info,
+                                   const std::string& table_name);
+  void get_tables_impl(std::vector<std::string>& table_names,
+                       const TSessionId& session,
+                       const GetTablesType get_tables_type);
   void get_table_details_impl(TTableDetails& _return,
                               const TSessionId& session,
                               const std::string& table_name,
-                              const bool get_system);
+                              const bool get_system,
+                              const bool get_physical);
   void check_read_only(const std::string& str);
+  void check_session_exp(const SessionMap::iterator& session_it);
   SessionMap::iterator get_session_it(const TSessionId& session);
-  static void value_to_thrift_column(const TargetValue& tv, const SQLTypeInfo& ti, TColumn& column);
+  static void value_to_thrift_column(const TargetValue& tv,
+                                     const SQLTypeInfo& ti,
+                                     TColumn& column);
   static TDatum value_to_thrift(const TargetValue& tv, const SQLTypeInfo& ti);
-  std::string parse_to_ra(const std::string& query_str, const Catalog_Namespace::SessionInfo& session_info);
+  static std::string apply_copy_to_shim(const std::string& query_str);
+
+  std::string parse_to_ra(const std::string& query_str,
+                          const Catalog_Namespace::SessionInfo& session_info,
+                          std::map<std::string, bool>* tableNames = nullptr);
 
   void sql_execute_impl(TQueryResult& _return,
                         const Catalog_Namespace::SessionInfo& session_info,
@@ -294,9 +451,12 @@ class MapDHandler : public MapDIf {
                         const bool column_format,
                         const std::string& nonce,
                         const ExecutorDeviceType executor_device_type,
-                        const int32_t first_n);
+                        const int32_t first_n,
+                        const int32_t at_most_n);
 
-  void execute_distributed_copy_statement(Parser::CopyTableStmt*, const Catalog_Namespace::SessionInfo& session_info);
+  void execute_distributed_copy_statement(
+      Parser::CopyTableStmt*,
+      const Catalog_Namespace::SessionInfo& session_info);
 
   void validate_rel_alg(TTableDescriptor& _return,
                         const std::string& query_str,
@@ -307,24 +467,26 @@ class MapDHandler : public MapDIf {
                        const Catalog_Namespace::SessionInfo& session_info,
                        const ExecutorDeviceType executor_device_type,
                        const int32_t first_n,
+                       const int32_t at_most_n,
                        const bool just_explain,
                        const bool just_validate) const;
-#ifdef ENABLE_ARROW_CONVERTER
   void execute_rel_alg_df(TDataFrame& _return,
                           const std::string& query_ra,
                           const Catalog_Namespace::SessionInfo& session_info,
                           const ExecutorDeviceType device_type,
                           const size_t device_id,
                           const int32_t first_n) const;
-#endif
-  TColumnType populateThriftColumnType(const Catalog_Namespace::Catalog* cat, const ColumnDescriptor* cd);
-  TRowDescriptor fixup_row_descriptor(const TRowDescriptor& row_desc, const Catalog_Namespace::Catalog& cat);
-  void set_execution_mode_nolock(Catalog_Namespace::SessionInfo* session_ptr, const TExecuteMode::type mode);
+  TColumnType populateThriftColumnType(const Catalog_Namespace::Catalog* cat,
+                                       const ColumnDescriptor* cd);
+  TRowDescriptor fixup_row_descriptor(const TRowDescriptor& row_desc,
+                                      const Catalog_Namespace::Catalog& cat);
+  void set_execution_mode_nolock(Catalog_Namespace::SessionInfo* session_ptr,
+                                 const TExecuteMode::type mode);
   char unescape_char(std::string str);
   Importer_NS::CopyParams thrift_to_copyparams(const TCopyParams& cp);
   TCopyParams copyparams_to_thrift(const Importer_NS::CopyParams& cp);
-  void check_geospatial_files(const boost::filesystem::path file_path);
-  std::string sanitize_name(const std::string& name);
+  void check_geospatial_files(const boost::filesystem::path file_path,
+                              const Importer_NS::CopyParams& copy_params);
   void render_rel_alg(TRenderResult& _return,
                       const std::string& query_ra,
                       const std::string& query_str,
@@ -332,21 +494,27 @@ class MapDHandler : public MapDIf {
                       const std::string& render_type,
                       const bool is_projection_query);
 
-  TColumnType create_array_column(const TDatumType::type type, const std::string& name);
-  void throw_profile_exception(const std::string& error_msg);
+  TColumnType create_geo_column(const TDatumType::type type,
+                                const std::string& name,
+                                const bool is_array);
 
-  void convert_explain(TQueryResult& _return, const ResultRows& results, const bool column_format) const;
-  void convert_result(TQueryResult& _return, const ResultRows& results, const bool column_format) const;
+  void convert_explain(TQueryResult& _return,
+                       const ResultSet& results,
+                       const bool column_format) const;
+  void convert_result(TQueryResult& _return,
+                      const ResultSet& results,
+                      const bool column_format) const;
 
   template <class R>
   void convert_rows(TQueryResult& _return,
                     const std::vector<TargetMetaInfo>& targets,
                     const R& results,
                     const bool column_format,
-                    const int32_t first_n) const;
+                    const int32_t first_n,
+                    const int32_t at_most_n) const;
 
   void create_simple_result(TQueryResult& _return,
-                            const ResultRows& results,
+                            const ResultSet& results,
                             const bool column_format,
                             const std::string label) const;
 
@@ -360,44 +528,66 @@ class MapDHandler : public MapDIf {
   std::vector<TargetMetaInfo> getTargetMetaInfo(
       const std::vector<std::shared_ptr<Analyzer::TargetEntry>>& targets) const;
 
-#ifdef ENABLE_ARROW_CONVERTER
-  std::vector<std::string> getTargetNames(const std::vector<TargetMetaInfo>& targets) const;
+  std::vector<std::string> getTargetNames(
+      const std::vector<TargetMetaInfo>& targets) const;
 
-  std::vector<std::string> getTargetNames(const std::vector<std::shared_ptr<Analyzer::TargetEntry>>& targets) const;
-#endif
+  std::vector<std::string> getTargetNames(
+      const std::vector<std::shared_ptr<Analyzer::TargetEntry>>& targets) const;
 
-  void render_root_plan(TRenderResult& _return,
-                        Planner::RootPlan* root_plan,
-                        const std::string& query_str,
-                        const Catalog_Namespace::SessionInfo& session_info,
-                        const std::string& render_type,
-                        const bool is_projection_query);
+  TRowDescriptor convert_target_metainfo(
+      const std::vector<TargetMetaInfo>& targets) const;
 
-  TRowDescriptor convert_target_metainfo(const std::vector<TargetMetaInfo>& targets) const;
+  void get_completion_hints_unsorted(std::vector<TCompletionHint>& hints,
+                                     std::vector<std::string>& visible_tables,
+                                     const TSessionId& session,
+                                     const std::string& sql,
+                                     const int cursor);
+  void get_token_based_completions(std::vector<TCompletionHint>& hints,
+                                   const TSessionId& session,
+                                   const std::vector<std::string>& visible_tables,
+                                   const std::string& sql,
+                                   const int cursor);
+  Planner::RootPlan* parse_to_plan(const std::string& query_str,
+                                   const Catalog_Namespace::SessionInfo& session_info);
+  Planner::RootPlan* parse_to_plan_legacy(
+      const std::string& query_str,
+      const Catalog_Namespace::SessionInfo& session_info,
+      const std::string& action /* render or validate */);
 
-  Planner::RootPlan* parse_to_plan(const std::string& query_str, const Catalog_Namespace::SessionInfo& session_info);
+  std::unordered_map<std::string, std::unordered_set<std::string>>
+  fill_column_names_by_table(const std::vector<std::string>& table_names,
+                             const TSessionId& session);
 
-  std::vector<TColumnRange> column_ranges_to_thrift(const AggregatedColRange& column_ranges);
+  // For the provided upper case column names `uc_column_names`, return the tables
+  // from `table_names` which contain at least one of them. Used to rank the TABLE
+  // auto-completion hints by the columns specified in the projection.
+  std::unordered_set<std::string> get_uc_compatible_table_names_by_column(
+      const std::unordered_set<std::string>& uc_column_names,
+      const std::vector<std::string>& table_names,
+      const TSessionId& session);
 
-  std::vector<TDictionaryGeneration> string_dictionary_generations_to_thrift(
-      const StringDictionaryGenerations& dictionary_generations);
-
-  static std::vector<TTableGeneration> table_generations_to_thrift(const TableGenerations& table_generations);
-
-  Planner::RootPlan* parse_to_plan_legacy(const std::string& query_str,
-                                          const Catalog_Namespace::SessionInfo& session_info,
-                                          const std::string& action /* render or validate */);
-
-  void set_table_start_epoch(const Catalog_Namespace::SessionInfo& sessionInfo);
-
-  std::string start_epoch_table_name_;
-  int start_epoch_;
-  bool is_decr_start_epoch_;
-  bool super_user_rights_;  // default is "false"; setting to "true" ignores passwd checks in "connect(..)" method
+  bool super_user_rights_;  // default is "false"; setting to "true" ignores passwd checks
+                            // in "connect(..)" method
   const bool access_priv_check_;
-  friend void run_warmup_queries(boost::shared_ptr<MapDHandler> handler,
+  const int idle_session_duration_;  // max duration of idle session
+  const int max_session_duration_;   // max duration of session
+
+  bool _was_geo_copy_from;
+  std::string _geo_copy_from_table;
+  std::string _geo_copy_from_file_name;
+  Importer_NS::CopyParams _geo_copy_from_copy_params;
+
+  // Only for IPC device memory deallocation
+  mutable std::mutex handle_to_dev_ptr_mutex_;
+  mutable std::unordered_map<std::string, int8_t*> ipc_handle_to_dev_ptr_;
+
+  friend void run_warmup_queries(mapd::shared_ptr<MapDHandler> handler,
                                  std::string base_path,
                                  std::string query_file_path);
+
+  friend class MapDRenderHandler;
+  friend class MapDAggHandler;
+  friend class MapDLeafHandler;
 };
 
 #endif /* MAPDHANDLER_H */

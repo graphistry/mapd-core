@@ -17,8 +17,8 @@
 #ifndef FRONTEND_VIEW_DESCRIPTOR_H
 #define FRONTEND_VIEW_DESCRIPTOR_H
 
-#include <string>
 #include <cstdint>
+#include <string>
 #include "../Shared/sqldefs.h"
 
 /**
@@ -35,6 +35,7 @@ struct FrontendViewDescriptor {
   std::string updateTime;
   std::string viewMetadata;
   int32_t userId;
+  std::string user;
 };
 
 #endif  // FRONTEND_VIEW_DESCRIPTOR

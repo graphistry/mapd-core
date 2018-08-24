@@ -17,14 +17,19 @@
 #ifndef QUERYENGINE_RELALGEXECUTOR_H
 #define QUERYENGINE_RELALGEXECUTOR_H
 
-#include "InputMetadata.h"
+#include "../Shared/scope.h"
+#include "Distributed/AggregatedResult.h"
 #include "Execute.h"
+#include "InputMetadata.h"
 #include "QueryRewrite.h"
 #include "RelAlgExecutionDescriptor.h"
 #include "SpeculativeTopN.h"
-#include "../Shared/scope.h"
+#include "StreamingTopN.h"
 
 #include <ctime>
+#include <sstream>
+
+#include "StorageIOFacility.h"
 
 enum class MergeType { Union, Reduce };
 
@@ -35,10 +40,23 @@ struct FirstStepExecutionResult {
   bool is_outermost_query;
 };
 
-class RelAlgExecutor {
+struct RelAlgExecutorTraits {
+  using ExecutorType = Executor;
+  using CatalogType = Catalog_Namespace::Catalog;
+  using TableDescriptorType = TableDescriptor;
+};
+
+class RelAlgExecutor : private StorageIOFacility<RelAlgExecutorTraits> {
  public:
+  using TargetInfoList = std::vector<TargetInfo>;
+  using RowSetPtrSharedPtr = std::shared_ptr<RowSetPtr>;
+
   RelAlgExecutor(Executor* executor, const Catalog_Namespace::Catalog& cat)
-      : executor_(executor), cat_(cat), now_(0), queue_time_ms_(0) {}
+      : StorageIOFacility(executor, cat)
+      , executor_(executor)
+      , cat_(cat)
+      , now_(0)
+      , queue_time_ms_(0) {}
 
   ExecutionResult executeRelAlgQuery(const std::string& query_ra,
                                      const CompilationOptions& co,
@@ -50,9 +68,10 @@ class RelAlgExecutor {
                                                        const ExecutionOptions& eo,
                                                        RenderInfo* render_info);
 
-  void prepareLeafExecution(const AggregatedColRange& agg_col_range,
-                            const StringDictionaryGenerations& string_dictionary_generations,
-                            const TableGenerations& table_generations);
+  void prepareLeafExecution(
+      const AggregatedColRange& agg_col_range,
+      const StringDictionaryGenerations& string_dictionary_generations,
+      const TableGenerations& table_generations);
 
   ExecutionResult executeRelAlgSubQuery(const RexSubQuery* subquery,
                                         const CompilationOptions& co,
@@ -64,11 +83,18 @@ class RelAlgExecutor {
                                    RenderInfo* render_info,
                                    const int64_t queue_time_ms);
 
-  const std::vector<std::string>& getScanTableNamesInRelAlgSeq() const;
+  void addLeafResult(const unsigned id, const AggregatedResult& result) {
+    const auto it_ok = leaf_results_.emplace(id, result);
+    CHECK(it_ok.second);
+  }
 
-  void registerSubquery(RexSubQuery* subquery) noexcept { subqueries_.push_back(subquery); }
+  void registerSubquery(std::shared_ptr<RexSubQuery> subquery) noexcept {
+    subqueries_.push_back(subquery);
+  }
 
-  const std::vector<RexSubQuery*>& getSubqueries() const noexcept { return subqueries_; };
+  const std::vector<std::shared_ptr<RexSubQuery>>& getSubqueries() const noexcept {
+    return subqueries_;
+  };
 
   AggregatedColRange computeColRangesCache(const RelAlgNode* ra);
 
@@ -78,13 +104,42 @@ class RelAlgExecutor {
 
   Executor* getExecutor() const;
 
+  void cleanupPostExecution();
+
  private:
+  ExecutionResult executeRelAlgQueryNoRetry(const std::string& query_ra,
+                                            const CompilationOptions& co,
+                                            const ExecutionOptions& eo,
+                                            RenderInfo* render_info);
+
   void executeRelAlgStep(const size_t step_idx,
                          std::vector<RaExecutionDesc>&,
                          const CompilationOptions&,
                          const ExecutionOptions&,
                          RenderInfo*,
                          const int64_t queue_time_ms);
+
+  void executeUpdateViaCompound(const RelCompound* compound,
+                                const CompilationOptions& co,
+                                const ExecutionOptions& eo,
+                                RenderInfo* render_info,
+                                const int64_t queue_time_ms);
+  void executeUpdateViaProject(const RelProject*,
+                               const CompilationOptions&,
+                               const ExecutionOptions&,
+                               RenderInfo*,
+                               const int64_t queue_time_ms);
+
+  void executeDeleteViaCompound(const RelCompound* compound,
+                                const CompilationOptions& co,
+                                const ExecutionOptions& eo,
+                                RenderInfo* render_info,
+                                const int64_t queue_time_ms);
+  void executeDeleteViaProject(const RelProject*,
+                               const CompilationOptions&,
+                               const ExecutionOptions&,
+                               RenderInfo*,
+                               const int64_t queue_time_ms);
 
   ExecutionResult executeCompound(const RelCompound*,
                                   const CompilationOptions&,
@@ -122,6 +177,9 @@ class RelAlgExecutor {
                               RenderInfo*,
                               const int64_t queue_time_ms);
 
+  ExecutionResult executeLogicalValues(const RelLogicalValues*, const ExecutionOptions&);
+  ExecutionResult executeModify(const RelModify* modify, const ExecutionOptions& eo);
+
   // TODO(alex): just move max_groups_buffer_entry_guess to RelAlgExecutionUnit once
   //             we deprecate the plan-based executor paths and remove WorkUnit
   struct WorkUnit {
@@ -153,12 +211,6 @@ class RelAlgExecutor {
 
   bool isRowidLookup(const WorkUnit& work_unit);
 
-  ExecutionResult renderWorkUnit(const RelAlgExecutor::WorkUnit& work_unit,
-                                 const std::vector<TargetMetaInfo>& targets_meta,
-                                 RenderInfo* render_info,
-                                 const int32_t error_code,
-                                 const int64_t queue_time_ms);
-
   void executeUnfoldedMultiJoin(const RelAlgNode* user,
                                 RaExecutionDesc& exec_desc,
                                 const CompilationOptions& co,
@@ -179,13 +231,28 @@ class RelAlgExecutor {
 
   WorkUnit createWorkUnit(const RelAlgNode*, const SortInfo&, const bool just_explain);
 
-  WorkUnit createCompoundWorkUnit(const RelCompound*, const SortInfo&, const bool just_explain);
+  WorkUnit createModifyCompoundWorkUnit(const RelCompound* compound,
+                                        const SortInfo& sort_info,
+                                        const bool just_explain);
+  WorkUnit createCompoundWorkUnit(const RelCompound*,
+                                  const SortInfo&,
+                                  const bool just_explain);
 
-  WorkUnit createAggregateWorkUnit(const RelAggregate*, const SortInfo&, const bool just_explain);
+  WorkUnit createAggregateWorkUnit(const RelAggregate*,
+                                   const SortInfo&,
+                                   const bool just_explain);
 
-  WorkUnit createProjectWorkUnit(const RelProject*, const SortInfo&, const bool just_explain);
+  WorkUnit createModifyProjectWorkUnit(const RelProject* project,
+                                       const SortInfo& sort_info,
+                                       const bool just_explain);
 
-  WorkUnit createFilterWorkUnit(const RelFilter*, const SortInfo&, const bool just_explain);
+  WorkUnit createProjectWorkUnit(const RelProject*,
+                                 const SortInfo&,
+                                 const bool just_explain);
+
+  WorkUnit createFilterWorkUnit(const RelFilter*,
+                                const SortInfo&,
+                                const bool just_explain);
 
   WorkUnit createJoinWorkUnit(const RelJoin*, const SortInfo&, const bool just_explain);
 
@@ -199,17 +266,29 @@ class RelAlgExecutor {
     CHECK(it_ok.second);
   }
 
-  void handleNop(const RelAlgNode*);
+  void handleNop(RaExecutionDesc& ed);
 
-  static std::vector<std::string> getScanTableNamesInRelAlgSeq(std::vector<RaExecutionDesc>& exec_descs);
+  JoinQualsPerNestingLevel translateLeftDeepJoinFilter(
+      const RelLeftDeepInnerJoin* join,
+      const std::vector<InputDescriptor>& input_descs,
+      const std::unordered_map<const RelAlgNode*, int>& input_to_nest_level,
+      const bool just_explain);
+
+  // Transform the provided `join_condition` to conjunctive form, find composite
+  // key opportunities and finally translate it to an Analyzer expression.
+  std::list<std::shared_ptr<Analyzer::Expr>> makeJoinQuals(
+      const RexScalar* join_condition,
+      const std::vector<JoinType>& join_types,
+      const std::unordered_map<const RelAlgNode*, int>& input_to_nest_level,
+      const bool just_explain) const;
 
   Executor* executor_;
   const Catalog_Namespace::Catalog& cat_;
   TemporaryTables temporary_tables_;
   time_t now_;
   std::vector<std::shared_ptr<Analyzer::Expr>> target_exprs_owned_;  // TODO(alex): remove
-  std::vector<std::string> table_names_;  // used by poly rendering only, lazily initialized by executeRelAlgQuery()
-  std::vector<RexSubQuery*> subqueries_;
+  std::vector<std::shared_ptr<RexSubQuery>> subqueries_;
+  std::unordered_map<unsigned, AggregatedResult> leaf_results_;
   int64_t queue_time_ms_;
   static SpeculativeTopNBlacklist speculative_topn_blacklist_;
   static const size_t max_groups_buffer_entry_default_guess{16384};

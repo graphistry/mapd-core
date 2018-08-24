@@ -1,5 +1,7 @@
 namespace java com.mapd.thrift.server
 
+include "completion_hints.thrift"
+
 enum TDatumType {
   SMALLINT,
   INT,
@@ -13,7 +15,14 @@ enum TDatumType {
   DATE,
   BOOL,
   INTERVAL_DAY_TIME,
-  INTERVAL_YEAR_MONTH
+  INTERVAL_YEAR_MONTH,
+  POINT,
+  LINESTRING,
+  POLYGON,
+  MULTIPOLYGON,
+  TINYINT,
+  GEOMETRY,
+  GEOGRAPHY
 }
 
 enum TEncodingType {
@@ -22,12 +31,12 @@ enum TEncodingType {
   RL,
   DIFF,
   DICT,
-  SPARSE
+  SPARSE,
+  GEOINT
 }
 
 enum TExecuteMode {
-  HYBRID,
-  GPU,
+  GPU = 1,
   CPU
 }
 
@@ -39,6 +48,13 @@ enum TDeviceType {
 enum TTableType {
   DELIMITED,
   POLYGON
+}
+
+enum TPartitionDetail {
+  DEFAULT,
+  REPLICATED,
+  SHARDED,
+  OTHER
 }
 
 /* union */ struct TDatumVal {
@@ -65,7 +81,8 @@ struct TTypeInfo {
   3: bool is_array,
   5: i32 precision,
   6: i32 scale,
-  7: i32 comp_param
+  7: i32 comp_param,
+  8: optional i32 size=-1
 }
 
 struct TColumnType {
@@ -73,7 +90,8 @@ struct TColumnType {
   2: TTypeInfo col_type,
   3: bool is_reserved_keyword,
   4: string src_name,
-  5: bool is_system
+  5: bool is_system,
+  6: bool is_physical
 }
 
 struct TRow {
@@ -146,11 +164,6 @@ exception TMapDException {
   1: string error_msg
 }
 
-struct TRenderProperty {
-  1: TDatumType property_type
-  2: TDatumVal property_value
-}
-
 struct TCopyParams {
   1: string delimiter
   2: string null_str
@@ -164,6 +177,18 @@ struct TCopyParams {
   10: string array_end
   11: i32 threads
   12: TTableType table_type=TTableType.DELIMITED
+  13: string s3_access_key
+  14: string s3_secret_key
+  15: string s3_region
+  16: TEncodingType geo_coords_encoding=TEncodingType.GEOINT
+  17: i32 geo_coords_comp_param=32
+  18: TDatumType geo_coords_type=TDatumType.GEOMETRY
+  19: i32 geo_coords_srid=4326
+  20: bool sanitize_column_names=true
+}
+
+struct TCreateParams {
+  1: bool is_replicated
 }
 
 struct TDetectResult {
@@ -186,27 +211,30 @@ struct TFrontendView {
   5: string view_metadata
 }
 
+struct TDashboard {
+  1: string dashboard_name
+  2: string dashboard_state
+  3: string image_hash
+  4: string update_time
+  5: string dashboard_metadata
+  6: i32 dashboard_id
+  7: string dashboard_owner
+  8: bool is_dash_shared
+}
+
 struct TServerStatus {
   1: bool read_only
   2: string version
   3: bool rendering_enabled
   4: i64 start_time
   5: string edition
+  6: string host_name
+  7: bool poly_rendering_enabled
 }
-
-typedef map<string, TRenderProperty> TRenderPropertyMap
-typedef map<string, TRenderPropertyMap> TColumnRenderMap
 
 struct TPixel {
   1: i64 x
   2: i64 y
-}
-
-struct TPixelRowResult {
-  1: TPixel pixel
-  2: i64 row_id
-  3: TRowSet row_set
-  4: string nonce
 }
 
 struct TPixelTableRowResult {
@@ -218,34 +246,63 @@ struct TPixelTableRowResult {
   6: string nonce
 }
 
-struct TPixelRows {
-  1: TPixel pixel
-  2: TRowSet row_set
-}
-
-struct TPixelResult {
-  1: list<TPixelRows> pixel_rows
-  2: string nonce
-}
-
 struct TRenderResult {
   1: binary image
   2: string nonce
   3: i64 execution_time_ms
   4: i64 render_time_ms
   5: i64 total_time_ms
+  6: string vega_metadata
 }
 
-struct TGpuMemorySummary {
-  1: i64 max
-  2: i64 in_use
-  3: i64 allocated
-  4: bool is_allocation_capped
+struct TGpuSpecification {
+  1: i32 num_sm
+  2: i64 clock_frequency_kHz
+  3: i64 memory
+  4: i16 compute_capability_major
+  5: i16 compute_capability_minor
 }
 
-struct TMemorySummary {
-  1: i64 cpu_memory_in_use
-  2: list<TGpuMemorySummary> gpu_summary
+struct THardwareInfo {
+  1: i16 num_gpu_hw
+  2: i16 num_cpu_hw
+  3: i16 num_gpu_allocated
+  4: i16 start_gpu
+  5: string host_name
+  6: list<TGpuSpecification> gpu_info
+}
+
+struct TClusterHardwareInfo {
+  1: list<THardwareInfo> hardware_info
+}
+
+struct TMemoryData {
+  1: i64 slab
+  2: i32 start_page
+  3: i64 num_pages
+  4: i32 touch
+  5: list<i64> chunk_key
+  6: i32 buffer_epoch
+  7: bool is_free
+}
+
+struct TNodeMemoryInfo {
+  1: string host_name
+  2: i64 page_size
+  3: i64 max_num_pages
+  4: i64 num_pages_allocated
+  5: bool is_allocation_capped
+  6: list<TMemoryData> node_memory_data
+}
+
+struct TTableMeta {
+  1: string table_name
+  2: i64 num_cols
+  3: list<TDatumType> col_datum_types
+  4: bool is_view
+  5: bool is_replicated
+  6: i64 shard_count
+  7: i64 max_rows
 }
 
 struct TTableDetails {
@@ -257,6 +314,7 @@ struct TTableDetails {
   6: i64 shard_count
   7: string key_metainfo
   8: bool is_temporary
+  9: TPartitionDetail partition_detail
 }
 
 enum TExpressionRangeType {
@@ -314,23 +372,103 @@ struct TInsertData {
   5: i64 num_rows
 }
 
+struct TPendingRenderQuery {
+  1: TQueryId id
+}
+
+struct TRenderParseResult {
+  1: TMergeType merge_type
+  2: i32 node_id
+  3: i64 execution_time_ms
+  4: i64 render_time_ms
+  5: i64 total_time_ms
+}
+
 struct TRawRenderPassDataResult {
   1: i32 num_channels
   2: binary pixels
   3: binary row_ids_A
   4: binary row_ids_B
   5: binary table_ids
+  6: binary accum_data
 }
 
 typedef map<i32, TRawRenderPassDataResult> TRenderPassMap
 
-struct TRawPixelDataResult {
+struct TRawPixelData {
   1: i32 width
   2: i32 height
   3: TRenderPassMap render_pass_map
-  8: i64 execution_time_ms
-  9: i64 render_time_ms
-  10: i64 total_time_ms
+}
+
+struct TRenderDatum {
+  1: TDatumType type
+  2: i32 cnt
+  3: binary value
+}
+
+typedef map<string, map<string, map<string, map<string, list<TRenderDatum>>>>> TRenderAggDataMap
+
+struct TRenderStepResult {
+  1: TRenderAggDataMap merge_data
+  2: TRawPixelData raw_pixel_data
+  3: i64 execution_time_ms
+  4: i64 render_time_ms
+  5: i64 total_time_ms
+}
+struct TDatabasePermissions {
+  1: bool create_;
+  2: bool delete_;
+}
+
+struct TTablePermissions {
+  1: bool create_;
+  2: bool drop_;
+  3: bool select_;
+  4: bool insert_;
+  5: bool update_;
+  6: bool delete_;
+  7: bool truncate_;
+}
+
+struct TDashboardPermissions {
+  1: bool create_;
+  2: bool delete_;
+  3: bool view_;
+  4: bool edit_;
+}
+
+struct TViewPermissions {
+  1: bool create_;
+  2: bool drop_;
+  3: bool select_;
+  4: bool insert_;
+  5: bool update_;
+  6: bool delete_;
+}
+
+enum TDBObjectType {
+  AbstractDBObjectType = 0,
+  DatabaseDBObjectType,
+  TableDBObjectType,
+  DashboardDBObjectType
+  ViewDBObjectType
+}
+
+struct TDBObject {
+  1: string objectName
+  2: TDBObjectType objectType
+  3: list<bool> privs
+  4: string grantee
+}
+
+struct TDashboardGrantees {
+  1: string name;
+  2: bool is_user;
+  3: TDashboardPermissions permissions;
+}
+struct TLicenseInfo {
+  1: list<string> claims
 }
 
 service MapD {
@@ -338,7 +476,12 @@ service MapD {
   TSessionId connect(1: string user, 2: string passwd, 3: string dbname) throws (1: TMapDException e)
   void disconnect(1: TSessionId session) throws (1: TMapDException e)
   TServerStatus get_server_status(1: TSessionId session) throws (1: TMapDException e)
+  list<TServerStatus> get_status(1: TSessionId session) throws (1: TMapDException e)
+  TClusterHardwareInfo get_hardware_info(1: TSessionId session) throws (1: TMapDException e)
   list<string> get_tables(1: TSessionId session) throws (1: TMapDException e)
+  list<string> get_physical_tables(1: TSessionId session) throws (1: TMapDException e)
+  list<string> get_views(1: TSessionId session) throws (1: TMapDException e)
+  list<TTableMeta> get_tables_meta(1: TSessionId session) throws (1: TMapDException e)
   TTableDetails get_table_details(1: TSessionId session, 2: string table_name) throws (1: TMapDException e)
   TTableDetails get_internal_table_details(1: TSessionId session, 2: string table_name) throws (1: TMapDException e)
   list<string> get_users(1: TSessionId session) throws (1: TMapDException e)
@@ -347,17 +490,21 @@ service MapD {
   void start_heap_profile(1: TSessionId session) throws (1: TMapDException e)
   void stop_heap_profile(1: TSessionId session) throws (1: TMapDException e)
   string get_heap_profile(1: TSessionId session) throws (1: TMapDException e)
-  string get_memory_gpu(1: TSessionId session) throws (1: TMapDException e)
-  string get_memory_cpu(1: TSessionId session) throws (1: TMapDException e)
-  TMemorySummary get_memory_summary(1: TSessionId session) throws (1: TMapDException e)
+  list<TNodeMemoryInfo> get_memory(1: TSessionId session, 2: string memory_level) throws (1: TMapDException e)
   void clear_cpu_memory(1: TSessionId session) throws (1: TMapDException e)
   void clear_gpu_memory(1: TSessionId session) throws (1: TMapDException e)
+  void set_table_epoch (1: TSessionId session 2: i32 db_id 3: i32 table_id 4: i32 new_epoch) throws (1: TMapDException e)
+  void set_table_epoch_by_name (1: TSessionId session 2: string table_name 3: i32 new_epoch) throws (1: TMapDException e)
+  i32 get_table_epoch (1: TSessionId session 2: i32 db_id 3: i32 table_id);
+  i32 get_table_epoch_by_name (1: TSessionId session 2: string table_name);
   # query, render
-  TQueryResult sql_execute(1: TSessionId session, 2: string query 3: bool column_format, 4: string nonce, 5: i32 first_n = -1) throws (1: TMapDException e)
+  TQueryResult sql_execute(1: TSessionId session, 2: string query 3: bool column_format, 4: string nonce, 5: i32 first_n = -1, 6: i32 at_most_n = -1) throws (1: TMapDException e)
   TDataFrame sql_execute_df(1: TSessionId session, 2: string query 3: TDeviceType device_type 4: i32 device_id = 0 5: i32 first_n = -1) throws (1: TMapDException e)
   TDataFrame sql_execute_gdf(1: TSessionId session, 2: string query 3: i32 device_id = 0, 4: i32 first_n = -1) throws (1: TMapDException e)
+  void deallocate_df(1: TSessionId session, 2: TDataFrame df, 3: TDeviceType device_type, 4: i32 device_id = 0) throws (1: TMapDException e)
   void interrupt(1: TSessionId session) throws (1: TMapDException e)
   TTableDescriptor sql_validate(1: TSessionId session, 2: string query) throws (1: TMapDException e)
+  list<completion_hints.TCompletionHint> get_completion_hints(1: TSessionId session, 2:string sql, 3:i32 cursor) throws (1: TMapDException e)
   void set_execution_mode(1: TSessionId session, 2: TExecuteMode mode) throws (1: TMapDException e)
   TRenderResult render_vega(1: TSessionId session, 2: i64 widget_id, 3: string vega_json, 4: i32 compression_level, 5: string nonce) throws (1: TMapDException e)
   TPixelTableRowResult get_result_row_for_pixel(1: TSessionId session, 2: i64 widget_id, 3: TPixel pixel, 4: map<string, list<string>> table_col_names, 5: bool column_format, 6: i32 pixelRadius, 7: string nonce) throws (1: TMapDException e)
@@ -366,26 +513,47 @@ service MapD {
   list<TFrontendView> get_frontend_views(1: TSessionId session) throws (1: TMapDException e)
   void create_frontend_view(1: TSessionId session, 2: string view_name, 3: string view_state, 4: string image_hash, 5: string view_metadata) throws (1: TMapDException e)
   void delete_frontend_view(1: TSessionId session, 2: string view_name) throws (1: TMapDException e)
+  #dashboard will deprecate frontendview name over time
+  TDashboard get_dashboard(1: TSessionId session, 2: i32 dashboard_id) throws (1: TMapDException e)
+  list<TDashboard> get_dashboards(1: TSessionId session) throws (1: TMapDException e)
+  i32 create_dashboard(1: TSessionId session, 2: string dashboard_name, 3: string dashboard_state, 4: string image_hash, 5: string dashboard_metadata) throws (1: TMapDException e)
+  void replace_dashboard(1: TSessionId session, 2: i32 dashboard_id, 3: string dashboard_name, 4: string dashboard_owner, 5: string dashboard_state, 6: string image_hash, 7: string dashboard_metadata) throws (1: TMapDException e)
+  void delete_dashboard(1: TSessionId session, 2: i32 dashboard_id) throws (1: TMapDException e)
+  void share_dashboard(1: TSessionId session, 2: i32 dashboard_id, 3: list<string> groups, 4: list<string> objects, 5: TDashboardPermissions permissions) throws (1: TMapDException e)
+  void unshare_dashboard(1: TSessionId session, 2: i32 dashboard_id, 3: list<string> groups, 4: list<string> objects, 5: TDashboardPermissions permissions) throws (1: TMapDException e)
+  list<TDashboardGrantees> get_dashboard_grantees(1: TSessionId session, 2: i32 dashboard_id) throws (1: TMapDException e)
+  #dashboard links
   TFrontendView get_link_view(1: TSessionId session, 2: string link) throws (1: TMapDException e)
   string create_link(1: TSessionId session, 2: string view_state, 3: string view_metadata) throws (1: TMapDException e)
   # import
   void load_table_binary(1: TSessionId session, 2: string table_name, 3: list<TRow> rows) throws (1: TMapDException e)
+  void load_table_binary_columnar(1: TSessionId session, 2: string table_name, 3: list<TColumn> cols) throws (1: TMapDException e)
+  void load_table_binary_arrow(1: TSessionId session, 2: string table_name, 3: binary arrow_stream) throws (1: TMapDException e)
   void load_table(1: TSessionId session, 2: string table_name, 3: list<TStringRow> rows) throws (1: TMapDException e)
   TDetectResult detect_column_types(1: TSessionId session, 2: string file_name, 3: TCopyParams copy_params) throws (1: TMapDException e)
-  void create_table(1: TSessionId session, 2: string table_name, 3: TRowDescriptor row_desc, 4: TTableType table_type=TTableType.DELIMITED) throws (1: TMapDException e)
+  void create_table(1: TSessionId session, 2: string table_name, 3: TRowDescriptor row_desc, 4: TTableType table_type=TTableType.DELIMITED, 5: TCreateParams create_params) throws (1: TMapDException e)
   void import_table(1: TSessionId session, 2: string table_name, 3: string file_name, 4: TCopyParams copy_params) throws (1: TMapDException e)
   void import_geo_table(1: TSessionId session, 2: string table_name, 3: string file_name, 4: TCopyParams copy_params, 5: TRowDescriptor row_desc) throws (1: TMapDException e)
   TImportStatus import_table_status(1: TSessionId session, 2: string import_id) throws (1: TMapDException e)
+  string get_first_geo_file_in_archive(1: TSessionId session, 2: string archive_path, 3: TCopyParams copy_params) throws (1: TMapDException e)
+  list<string> get_all_files_in_archive(1: TSessionId session, 2: string archive_path, 3: TCopyParams copy_params) throws (1: TMapDException e)
   # distributed
   TPendingQuery start_query(1: TSessionId session, 2: string query_ra, 3: bool just_explain) throws (1: TMapDException e)
   TStepResult execute_first_step(1: TPendingQuery pending_query) throws (1: TMapDException e)
   void broadcast_serialized_rows(1: string serialized_rows, 2: TRowDescriptor row_desc, 3: TQueryId query_id) throws (1: TMapDException e)
-  TRawPixelDataResult render_vega_raw_pixels(1: TSessionId session, 2: i64 widget_id, 3: i16 node_idx 4: string vega_json) throws (1: TMapDException e)
+  TPendingRenderQuery start_render_query(1: TSessionId session, 2: i64 widget_id, 3: i16 node_idx, 4: string vega_json) throws (1: TMapDException e)
+  TRenderStepResult execute_next_render_step(1: TPendingRenderQuery pending_render, 2: TRenderAggDataMap merged_data) throws (1: TMapDException e)
   void insert_data(1: TSessionId session, 2: TInsertData insert_data) throws (1: TMapDException e)
+  void checkpoint(1: TSessionId session, 2: i32 db_id, 3: i32 table_id) throws (1: TMapDException e)
   # deprecated
   TTableDescriptor get_table_descriptor(1: TSessionId session, 2: string table_name) throws (1: TMapDException e)
   TRowDescriptor get_row_descriptor(1: TSessionId session, 2: string table_name) throws (1: TMapDException e)
-  TRenderResult render(1: TSessionId session, 2: string query, 3: string render_type, 4: string nonce) throws (1: TMapDException e)
-  TPixelResult get_rows_for_pixels(1: TSessionId session, 2: i64 widget_id, 3: list<TPixel> pixels, 4: string table_name, 5: list<string> col_names, 6: bool column_format, 7: string nonce) throws (1: TMapDException e)
-  TPixelRowResult get_row_for_pixel(1: TSessionId session, 2: i64 widget_id, 3: TPixel pixel, 4: string table_name, 5: list<string> col_names, 6: bool column_format, 7: i32 pixelRadius, 8: string nonce) throws (1: TMapDException e)
+  # object privileges
+  list<string> get_roles(1: TSessionId session) throws (1: TMapDException e)
+  list<TDBObject> get_db_objects_for_grantee(1: TSessionId session 2: string roleName) throws (1: TMapDException e)
+  list<TDBObject> get_db_object_privs(1: TSessionId session 2: string objectName 3: TDBObjectType type) throws (1: TMapDException e)
+  list<string> get_all_roles_for_user(1: TSessionId session 2: string userName) throws (1: TMapDException e)
+  # licensing
+  TLicenseInfo set_license_key(1: TSessionId session, 2: string key, 3: string nonce = "") throws (1: TMapDException e)
+  TLicenseInfo get_license_claims(1: TSessionId session, 2: string nonce = "") throws (1: TMapDException e)
 }

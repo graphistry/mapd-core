@@ -22,6 +22,7 @@ MapD Core is an in-memory, column store, SQL relational database that was design
 - [Community Forum](https://community.mapd.com)
 - [MapD Homepage](https://www.mapd.com)
 - [MapD Blog](https://www.mapd.com/blog/)
+- [MapD Downloads](https://www.mapd.com/platform/downloads/)
 
 # License
 
@@ -53,7 +54,8 @@ The following `cmake`/`ccmake` options can enable/disable different features:
 - `-DMAPD_IMMERSE_DOWNLOAD=on` download the latest master build of Immerse / `mapd2-frontend`. Default `on`.
 - `-DMAPD_DOCS_DOWNLOAD=on` download the latest master build of the documentation / `docs.mapd.com`. Default `off`. Note: this is a >50MB download.
 - `-DPREFER_STATIC_LIBS=on` static link dependencies, if available. Default `off`.
-- `-DENABLE_ARROW_CONVERTER=on` enable alpha support for the [GPU Data Frame](https://github.com/gpuopenanalytics), based on a subset of the [Apache Arrow specification](http://arrow.apache.org/). Default `off`.
+- `-DENABLE_AWS_S3=on` enable AWS S3 support, if available. Default `on`.
+- `-DENABLE_TESTS=on` build unit tests. Default `on`.
 
 # Testing
 
@@ -65,15 +67,11 @@ The `sanity_tests` target runs the most common tests. If using Makefiles to buil
 
 ## AddressSanitizer
 
-[AddressSanitizer](https://github.com/google/sanitizers/wiki/AddressSanitizer) can be activated by setting the `ENABLE_ASAN` CMake flag in a fresh build directory. At this time CUDA must also be disabled, and Calcite must be run in standalone/server mode. In an empty build directory run CMake and compile:
+[AddressSanitizer](https://github.com/google/sanitizers/wiki/AddressSanitizer) can be activated by setting the `ENABLE_ASAN` CMake flag in a fresh build directory. At this time CUDA must also be disabled. In an empty build directory run CMake and compile:
 
     mkdir build && cd build
     cmake -DENABLE_ASAN=on -DENABLE_CUDA=off ..
     make -j 4
-
-In a separate terminal start Calcite in standalone mode from the build directory:
-
-    java -jar bin/mapd-1.0-SNAPSHOT-jar-with-dependencies.jar --data=Tests/tmp
 
 Finally run the tests:
 
@@ -82,19 +80,36 @@ Finally run the tests:
 
 ## ThreadSanitizer
 
-[ThreadSanitizer](https://github.com/google/sanitizers/wiki/ThreadSanitizerCppManual) can be activated by setting the `ENABLE_TSAN` CMake flag in a fresh build directory. At this time CUDA must also be disabled, and Calcite must be run in standalone/server mode. In an empty build directory run CMake and compile:
+[ThreadSanitizer](https://github.com/google/sanitizers/wiki/ThreadSanitizerCppManual) can be activated by setting the `ENABLE_TSAN` CMake flag in a fresh build directory. At this time CUDA must also be disabled. In an empty build directory run CMake and compile:
 
     mkdir build && cd build
     cmake -DENABLE_TSAN=on -DENABLE_CUDA=off ..
     make -j 4
 
-In a separate terminal start Calcite in standalone mode from the build directory:
+We use a TSAN suppressions file to ignore warnings in third party libraries. Source the suppressions file by adding it to your `TSAN_OPTIONS` env:
 
-    java -jar bin/mapd-1.0-SNAPSHOT-jar-with-dependencies.jar --data=Tests/tmp
+    export TSAN_OPTIONS="suppressions=/path/to/mapd/config/tsan.suppressions"
 
 Finally run the tests:
 
     make sanity_tests
+
+# Generating Packages
+
+MapD Core uses [CPack](https://cmake.org/cmake/help/latest/manual/cpack.1.html) to generate packages for distribution. Packages generated on CentOS with static linking enabled can be used on most other recent Linux distributions.
+
+To generate packages on CentOS (assuming starting from top level of the mapd-core repository):
+
+    mkdir build-package && cd build-package
+    cmake -DPREFER_STATIC_LIBS=on -DCMAKE_BUILD_TYPE=release ..
+    make -j 4
+    cpack -G TGZ
+
+The first command creates a fresh build directory, to ensure there is nothing left over from a previous build.
+
+The second command configures the build to prefer linking to the dependencies' static libraries instead of the (default) shared libraries, and to build using CMake's `release` configuration (enables compiler optimizations). Linking to the static versions of the libraries libraries reduces the number of dependencies that must be installed on target systems.
+
+The last command generates a `.tar.gz` package. The `TGZ` can be replaced with, for example, `RPM` or `DEB` to generate a `.rpm` or `.deb`, respectively.
 
 # Using
 
@@ -138,19 +153,19 @@ where `HyperInteractive` is the default password. The default user `mapd` is ass
 
 You can also interact with the database using the web-based MapD Immerse frontend by visiting the web server's default port of `9092`:
 
-    http://localhost:9092
+[http://localhost:9092](http://localhost:9092)
 
 Note: usage of MapD Immerse is governed by a separate license agreement, provided under `EULA-CE.txt`. The version bundled with this project may only be used for non-commercial purposes.
 
 # Code Style
 
-A [`.clang-format`](http://clang.llvm.org/docs/ClangFormat.html) style configuration, based on the Chromium style guide, is provided at the top level of the repository. Please format your code using a recent version (3.8+) of ClangFormat before submitting.
+A [`.clang-format`](http://clang.llvm.org/docs/ClangFormat.html) style configuration, based on the Chromium style guide, is provided at the top level of the repository. Please format your code using a recent version (6.0+ preferred) of ClangFormat before submitting.
 
 To use:
 
     clang-format -i File.cpp
 
-Contributed code should compile without generating warnings by recent compilers (gcc 4.9, gcc 5.3, clang 3.8) on most Linux distributions. Changes to the code should follow the [C++ Core Guidelines](https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines).
+Contributed code should compile without generating warnings by recent compilers on most Linux distributions. Changes to the code should follow the [C++ Core Guidelines](https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines).
 
 # Dependencies
 
@@ -159,15 +174,15 @@ MapD has the following dependencies:
 | Package | Min Version | Required |
 | ------- | ----------- | -------- |
 | [CMake](https://cmake.org/) | 3.3 | yes |
-| [LLVM](http://llvm.org/) | 3.8 | yes |
-| [GCC](http://gcc.gnu.org/) | 4.9 | no, if building with clang |
+| [LLVM](http://llvm.org/) | 3.8-4.0, 6.0 | yes |
+| [GCC](http://gcc.gnu.org/) | 5.1 | no, if building with clang |
 | [Go](https://golang.org/) | 1.6 | yes |
-| [Boost](http://www.boost.org/) | 1.5.7 | yes |
+| [Boost](http://www.boost.org/) | 1.65.0 | yes |
 | [OpenJDK](http://openjdk.java.net/) | 1.7 | yes |
-| [CUDA](http://nvidia.com/cuda) | 7.5 | yes, if compiling with GPU support |
+| [CUDA](http://nvidia.com/cuda) | 8.0 | yes, if compiling with GPU support |
 | [gperftools](https://github.com/gperftools/gperftools) | | yes |
 | [gdal](http://gdal.org/) | | yes |
-| [Arrow](https://arrow.apache.org/) | 0.4.1 | no |
+| [Arrow](https://arrow.apache.org/) | 0.7.0 | yes |
 
 Dependencies for `mapd_web_server` and other Go utils are in [`ThirdParty/go`](ThirdParty/go). See [`ThirdParty/go/src/mapd/vendor/README.md`](ThirdParty/go/src/mapd/vendor/README.md) for instructions on how to add new deps.
 
@@ -198,7 +213,7 @@ First install the basic build tools:
 
 Next download and install the prebuilt dependencies:
 
-    curl -OJ https://internal-dependencies.mapd.com/mapd-deps/deploy.sh
+    curl -OJ https://dependencies.mapd.com/mapd-deps/deploy.sh
     sudo bash deploy.sh
 
 These dependencies will be installed to a directory under `/usr/local/mapd-deps`. The `deploy.sh` script also installs [Environment Modules](http://modules.sf.net) in order to simplify managing the required environment variables. Log out and log back in after running the `deploy.sh` script in order to active Environment Modules command, `module`.
@@ -241,149 +256,32 @@ Be sure to reboot after installing in order to activate the NVIDIA drivers.
 
 `mapd-deps-osx.sh` will automatically install Java and Maven via Homebrew and add the correct environment variables to `~/.bash_profile`.
 
-## Ubuntu 16.04, 16.10
+## Ubuntu
 
-Most build dependencies required by MapD Core are available via APT. Thrift, Blosc, and Folly must be built manually. The following will install all required dependencies and build the ones not available in the APT repositories. Be sure to run from the top level of the `mapd-core` repository so that the paths to the patch files are correct.
+Most build dependencies required by MapD Core are available via APT. Certain dependencies such as Thrift, Blosc, and Folly must be built as they either do not exist in the default repositories or have outdated versions. The provided build script will install all required dependencies (except CUDA) and build the dependencies which require it. The built dependencies will be installed to `/usr/local/mapd-deps/` by default; see the Environment Variables section below for how to add these dependencies to your environment.
 
-    sudo apt update
-    sudo apt install -y \
-        build-essential \
-        cmake \
-        cmake-curses-gui \
-        git \
-        wget \
-        curl \
-        clang \
-        clang-format \
-        llvm \
-        llvm-dev \
-        libboost-all-dev \
-        libgoogle-glog-dev \
-        golang \
-        libssl-dev \
-        libevent-dev \
-        default-jre \
-        default-jre-headless \
-        default-jdk \
-        default-jdk-headless \
-        maven \
-        libncurses5-dev \
-        binutils-dev \
-        google-perftools \
-        libdouble-conversion-dev \
-        libevent-dev \
-        libgdal-dev \
-        libgflags-dev \
-        libgoogle-perftools-dev \
-        libiberty-dev \
-        libjemalloc-dev \
-        liblz4-dev \
-        liblzma-dev \
-        libsnappy-dev \
-        zlib1g-dev \
-        autoconf \
-        autoconf-archive
+### Ubuntu 16.04
 
-    cd scripts
+MapD Core requires a newer version of Boost than the version which is provided by Ubuntu 16.04. The [scripts/mapd-deps-ubuntu1604.sh](scripts/mapd-deps-ubuntu1604.sh) build script will compile and install a newer version of Boost into the `/usr/local/mapd-deps/` directory. 
 
-    sudo apt build-dep -y thrift-compiler
-    VERS=0.10.0
-    wget http://apache.claz.org/thrift/$VERS/thrift-$VERS.tar.gz
-    tar xvf thrift-$VERS.tar.gz
-    pushd thrift-$VERS
-    patch -p1 < ../thrift-3821-tmemorybuffer-overflow-check.patch
-    patch -p1 < ../thrift-3821-tmemorybuffer-overflow-test.patch
-    ./configure \
-        --with-lua=no \
-        --with-python=no \
-        --with-php=no \
-        --with-ruby=no \
-        --prefix=/usr/local/mapd-deps
-    make -j $(nproc)
-    sudo make install
-    popd
+### Ubuntu 18.04
 
-    VERS=1.11.3
-    wget --continue https://github.com/Blosc/c-blosc/archive/v$VERS.tar.gz
-    tar xvf v$VERS.tar.gz
-    BDIR="c-blosc-$VERS/build"
-    rm -rf "$BDIR"
-    mkdir -p "$BDIR"
-    pushd "$BDIR"
-    cmake \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/usr/local/mapd-deps \
-        -DBUILD_BENCHMARKS=off \
-        -DBUILD_TESTS=off \
-        -DPREFER_EXTERNAL_SNAPPY=off \
-        -DPREFER_EXTERNAL_ZLIB=off \
-        -DPREFER_EXTERNAL_ZSTD=off \
-        ..
-    make -j $(nproc)
-    sudo make install
-    popd
+Use the [scripts/mapd-deps-ubuntu.sh](scripts/mapd-deps-ubuntu.sh) build script to install dependencies. 
 
-    VERS=2017.04.10.00
-    wget --continue https://github.com/facebook/folly/archive/v$VERS.tar.gz
-    tar xvf v$VERS.tar.gz
-    pushd folly-$VERS/folly
-    /usr/bin/autoreconf -ivf
-    ./configure --prefix=/usr/local/mapd-deps
-    make -j $(nproc)
-    sudo make install
-    popd
+Some installs of Ubuntu 18.04 may fail while building with a message similar to:
 
-    VERS=1.21-45
-    wget --continue https://github.com/jarro2783/bisonpp/archive/$VERS.tar.gz
-    tar xvf $VERS.tar.gz
-    pushd bisonpp-$VERS
-    ./configure --prefix=/usr/local/mapd-deps
-    make -j $(nproc)
-    sudo make install
-    popd
+    java.security.InvalidAlgorithmParameterException: the trustAnchors parameter must be non-empty
 
-    VERS=0.4.1
-    wget --continue https://github.com/apache/arrow/archive/apache-arrow-$VERS.tar.gz
-    tar -xf apache-arrow-$VERS.tar.gz
-    mkdir -p arrow-apache-arrow-$VERS/cpp/build
-    pushd arrow-apache-arrow-$VERS/cpp/build
-    cmake \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DARROW_BUILD_SHARED=off \
-        -DARROW_BUILD_STATIC=on \
-        -DCMAKE_INSTALL_PREFIX=/usr/local/mapd-deps \
-        -DARROW_BOOST_USE_SHARED=off \
-        -DARROW_JEMALLOC_USE_SHARED=off \
-        ..
-    make -j $(nproc)
-    sudo make install
-    popd
+This is a known issue in 18.04 which will be resolved in [Ubuntu 18.04.1](https://bugs.launchpad.net/ubuntu/+source/ca-certificates-java/+bug/1739631). To resolve on 18.04:
+
+    sudo rm /etc/ssl/certs/java/cacerts
+    sudo update-ca-certificates -f
 
 ### Environment Variables
 
-The CUDA and mapd-deps `lib` directories need to be added to `LD_LIBRARY_PATH`; the CUDA and mapd-deps `bin` directories need to be added to `PATH`. The easiest way to do so is by creating a new file named `/etc/profile.d/mapd-deps.sh` containing the following:
+The CUDA and mapd-deps `lib` directories need to be added to `LD_LIBRARY_PATH`; the CUDA and mapd-deps `bin` directories need to be added to `PATH`. The `mapd-deps-ubuntu.sh` script above will generate a script named `mapd-deps.sh` containing the environment variables which need to be set. Simply source this file in your current session (or symlink it to `/etc/profile.d/mapd-deps.sh`) in order to activate it:
 
-    LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-    LD_LIBRARY_PATH=/usr/local/mapd-deps/lib:$LD_LIBRARY_PATH
-    LD_LIBRARY_PATH=/usr/local/mapd-deps/lib64:$LD_LIBRARY_PATH
-
-    PATH=/usr/local/cuda/bin:$PATH
-    PATH=/usr/local/mapd-deps/bin:$PATH
-
-    export LD_LIBRARY_PATH PATH
-
-## Ubuntu 17.04
-
-Same as 16.10 with the following additions:
-
-    sudo apt install -y \
-        ccache \
-        libglu1-mesa-dev \
-        libglewmx-dev \
-        gcc-5 \
-        g++-5 \
-        libldap2-dev \
-        flex-old
+    source /usr/local/mapd-deps/mapd-deps.sh
 
 ### CUDA
 
@@ -393,19 +291,6 @@ Recent versions of Ubuntu provide the NVIDIA CUDA Toolkit and drivers in the sta
         nvidia-cuda-toolkit
 
 Be sure to reboot after installing in order to activate the NVIDIA drivers.
-
-### Environment Variables
-
-The CUDA and mapd-deps `lib` directories need to be added to `LD_LIBRARY_PATH`; the CUDA and mapd-deps `bin` directories need to be added to `PATH`. The easiest way to do so is by creating a new file named `/etc/profile.d/mapd-deps.sh` containing the following:
-
-    LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-    LD_LIBRARY_PATH=/usr/local/mapd-deps/lib:$LD_LIBRARY_PATH
-    LD_LIBRARY_PATH=/usr/local/mapd-deps/lib64:$LD_LIBRARY_PATH
-
-    PATH=/usr/local/cuda/bin:$PATH
-    PATH=/usr/local/mapd-deps/bin:$PATH
-
-    export LD_LIBRARY_PATH PATH
 
 ## Arch
 

@@ -25,9 +25,9 @@ set_property(CACHE MAPD_EDITION PROPERTY STRINGS "EE" "CE" "OS")
 add_definitions("-DMAPD_EDITION_${MAPD_EDITION}")
 string(TOLOWER "${MAPD_EDITION}" MAPD_EDITION_LOWER)
 
-set(MAPD_VERSION_MAJOR "3")
+set(MAPD_VERSION_MAJOR "4")
 set(MAPD_VERSION_MINOR "2")
-set(MAPD_VERSION_PATCH "1")
+set(MAPD_VERSION_PATCH "0")
 set(MAPD_VERSION_EXTRA "dev")
 set(MAPD_VERSION_RAW "${MAPD_VERSION_MAJOR}.${MAPD_VERSION_MINOR}.${MAPD_VERSION_PATCH}${MAPD_VERSION_EXTRA}")
 set(MAPD_IMMERSE_URL "http://builds.mapd.com/frontend/immerse-v2-latest-master-prod.zip")
@@ -40,6 +40,10 @@ else()
   set(MAPD_BUILD_NUMBER "dev")
 endif()
 set(MAPD_VERSION "${MAPD_VERSION_RAW}-${MAPD_BUILD_NUMBER}")
+
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -55,6 +59,21 @@ if(PREFER_STATIC_LIBS)
   endif()
 
   set(CUDA_USE_STATIC_CUDA_RUNTIME ON)
+endif()
+
+option(ENABLE_JAVA_REMOTE_DEBUG "Enable Java Remote Debug" OFF )
+if(ENABLE_JAVA_REMOTE_DEBUG)
+  add_definitions("-DENABLE_JAVA_REMOTE_DEBUG")
+endif()
+
+option(ENABLE_CALCITE_UPDATE_PATH "Enable Calcite Update Path" ON)
+if( ENABLE_CALCITE_UPDATE_PATH )
+  add_definitions("-DCALCITE_UPDATE_ENABLED")
+endif()
+
+option(ENABLE_CALCITE_DELETE_PATH "Enable Calcite Delete Path" ON)
+if( ENABLE_CALCITE_DELETE_PATH )
+  add_definitions("-DCALCITE_DELETE_ENABLED")
 endif()
 
 option(ENABLE_CUDA "Enable CUDA support" ON)
@@ -80,10 +99,16 @@ if(XCODE)
   add_definitions("-DXCODE")
 endif()
 
-find_package(Git)
-find_package(Glog REQUIRED)
 find_package(Thrift REQUIRED)
 include_directories(${Thrift_INCLUDE_DIRS})
+if("${Thrift_VERSION}" VERSION_LESS "0.11.0")
+  add_definitions("-DHAVE_THRIFT_BOOST_SHAREDPTR")
+else()
+  add_definitions("-DHAVE_THRIFT_STD_SHAREDPTR")
+endif()
+
+find_package(Git)
+find_package(Glog REQUIRED)
 find_package(PNG REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(GDAL REQUIRED)
@@ -108,13 +133,13 @@ set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR}/bin)
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux" AND (("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang"
     AND (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 3.6 OR CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL 3.6))
     OR ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 4.9)))
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++1y -DHAS_SHARED_MUTEX")
+  add_definitions("-DHAS_SHARED_MUTEX")
   find_package( Boost COMPONENTS filesystem program_options regex system REQUIRED QUIET )
 else()
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
   find_package( Boost COMPONENTS filesystem program_options regex thread system REQUIRED QUIET )
   if(PREFER_STATIC_LIBS AND ${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
     list(APPEND Boost_LIBRARIES rt)
+    list(INSERT Boost_LIBRARIES 0 libboost-thread)
     list(INSERT Boost_LIBRARIES 0 pthread)
   endif()
 endif()
@@ -152,7 +177,12 @@ if(ENABLE_ASAN)
   set(SAN_FLAGS "-fsanitize=address -O1 -fno-omit-frame-pointer")
   add_definitions("-DWITH_DECODERS_BOUNDS_CHECKING")
 elseif(ENABLE_TSAN)
+  # Copy the config directory to the build dir for TSAN suppressions
+  file(COPY config DESTINATION ${CMAKE_BINARY_DIR})
+
   set(SAN_FLAGS "-fsanitize=thread -fPIC -O1 -fno-omit-frame-pointer")
+  # required for older GCC, see https://gcc.gnu.org/bugzilla/show_bug.cgi?id=64354
+  add_definitions("-D__SANITIZE_THREAD__")
 endif()
 if(ENABLE_ASAN OR ENABLE_TSAN)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SAN_FLAGS}")
@@ -204,19 +234,20 @@ include_directories(ThirdParty/googletest)
 add_subdirectory(ThirdParty/googletest)
 
 # Arrow
-option(ENABLE_ARROW_CONVERTER "Enable arrow converter" OFF)
-if(ENABLE_ARROW_CONVERTER)
-  find_package(Arrow REQUIRED)
-  add_definitions("-DENABLE_ARROW_CONVERTER")
-  include_directories(${Arrow_INCLUDE_DIRS})
+find_package(Arrow REQUIRED)
+add_definitions("-DARROW_NO_DEPRECATED_API")
+if(HAVE_ARROW_STATIC_RECORDBATCH_CTOR)
+  add_definitions("-DHAVE_ARROW_STATIC_RECORDBATCH_CTOR")
 endif()
+if(HAVE_ARROW_APPENDVALUES)
+  add_definitions("-DHAVE_ARROW_APPENDVALUES")
+else()
+  message(WARNING "It appears that you have Arrow < 0.10.0. Please upgrade.")
+endif()
+include_directories(${Arrow_INCLUDE_DIRS})
 
 # RapidJSON
 include_directories(ThirdParty/rapidjson)
-
-# Poly2Tri
-include_directories(ThirdParty/poly2tri)
-add_subdirectory(ThirdParty/poly2tri)
 
 # Linenoise
 include_directories(ThirdParty/linenoise)
@@ -226,6 +257,26 @@ add_subdirectory(ThirdParty/linenoise)
 include_directories(ThirdParty/sqlite3)
 add_subdirectory(ThirdParty/sqlite3)
 
+#rdkafka
+include_directories(ThirdParty/librdkafka/src-cpp)
+add_subdirectory(ThirdParty/librdkafka)
+
+# aws-sdk
+option(ENABLE_AWS_S3 "Enable AWS S3 support" ON)
+if(ENABLE_AWS_S3)
+  find_package(LibAwsS3)
+  if(NOT LibAwsS3_FOUND)
+    set(ENABLE_AWS_S3 OFF CACHE BOOL "Enable AWS S3 support" FORCE)
+    message(STATUS "AWS SDK not found. Disabling AWS S3 support.")
+  else()
+    add_definitions("-DHAVE_AWS_S3")
+  endif()
+endif()
+
+# bcrypt
+include_directories(ThirdParty/bcrypt)
+add_subdirectory(ThirdParty/bcrypt)
+
 add_custom_command(
     DEPENDS ${CMAKE_SOURCE_DIR}/mapd.thrift
     OUTPUT
@@ -233,24 +284,57 @@ add_custom_command(
         ${CMAKE_BINARY_DIR}/gen-cpp/MapD.h
         ${CMAKE_BINARY_DIR}/gen-cpp/mapd_constants.cpp
         ${CMAKE_BINARY_DIR}/gen-cpp/mapd_types.cpp
+        ${CMAKE_BINARY_DIR}/gen-cpp/completion_hints_constants.cpp
+        ${CMAKE_BINARY_DIR}/gen-cpp/completion_hints_types.cpp
     COMMAND ${Thrift_EXECUTABLE}
-    ARGS -gen cpp -o ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/mapd.thrift)
+    ARGS -gen cpp -r -o ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/mapd.thrift)
 list(APPEND ADDITIONAL_MAKE_CLEAN_FILES ${CMAKE_BINARY_DIR}/gen-cpp/)
 
 add_library(mapd_thrift
     ${CMAKE_BINARY_DIR}/gen-cpp/MapD.cpp
     ${CMAKE_BINARY_DIR}/gen-cpp/MapD.h
     ${CMAKE_BINARY_DIR}/gen-cpp/mapd_constants.cpp
-    ${CMAKE_BINARY_DIR}/gen-cpp/mapd_types.cpp)
+    ${CMAKE_BINARY_DIR}/gen-cpp/mapd_types.cpp
+    ${CMAKE_BINARY_DIR}/gen-cpp/completion_hints_constants.cpp
+    ${CMAKE_BINARY_DIR}/gen-cpp/completion_hints_types.cpp)
+target_compile_options(mapd_thrift PRIVATE -fPIC)
 target_link_libraries(mapd_thrift ${Thrift_LIBRARIES})
+
+if("${MAPD_EDITION_LOWER}" STREQUAL "ee")
+  include_directories(Catalog/ee)
+  include_directories(Distributed/ee)
+else()
+  include_directories(Catalog/os)
+  include_directories(Distributed/os)
+endif()
+
+set(MAPD_RENDERING_LIBRARIES "")
+if(NOT "${MAPD_EDITION_LOWER}" STREQUAL "os")
+  option(ENABLE_RENDERING "Build backend renderer" OFF)
+  if(ENABLE_RENDERING)
+    # muparserx - currently render-only
+    include_directories(ThirdParty/muparserx)
+    add_subdirectory(ThirdParty/muparserx)
+
+    add_definitions("-DHAVE_RENDERING")
+    add_subdirectory(Rendering)
+    add_subdirectory(QueryRenderer)
+
+    include_directories(${RENDERING_INCLUDE_DIRS})
+    set(MAPD_RENDERING_LIBRARIES QueryRenderer Rendering)
+
+    set(MAPD_PACKAGE_FLAGS "${MAPD_PACKAGE_FLAGS}-render")
+    if(${RENDERER_CONTEXT_TYPE} STREQUAL "GLX")
+      set(MAPD_PACKAGE_FLAGS "${MAPD_PACKAGE_FLAGS}-glx")
+    endif()
+  endif()
+else()
+  set(ENABLE_RENDERING OFF CACHE BOOL "Build backend renderer" FORCE)
+endif()
 
 option(ENABLE_JOIN_EXEC "Enable RA vm to execute join node" ON)
 if(ENABLE_JOIN_EXEC)
   add_definitions("-DENABLE_JOIN_EXEC")
-  option(ENABLE_EQUIJOIN_FOLD "Enable multiple equi-join to be folded" ON)
-  if(ENABLE_EQUIJOIN_FOLD)
-    add_definitions("-DENABLE_EQUIJOIN_FOLD")
-  endif()
 endif()
 option(ENABLE_MULTIFRAG_JOIN "Enable Join on Multi-frag table" ON)
 if(ENABLE_MULTIFRAG_JOIN)
@@ -283,6 +367,8 @@ endif()
 
 add_subdirectory(SqliteConnector)
 
+add_subdirectory(Distributed)
+
 add_subdirectory(StringDictionary)
 add_subdirectory(Catalog)
 add_subdirectory(Parser)
@@ -296,6 +382,7 @@ add_subdirectory(Fragmenter)
 add_subdirectory(Chunk)
 add_subdirectory(Shared)
 add_subdirectory(Utils)
+add_subdirectory(QueryRunner)
 add_subdirectory(SQLFrontend)
 add_subdirectory(ThriftHandler)
 
@@ -306,28 +393,39 @@ endif()
 
 add_subdirectory(Calcite)
 
-set(MAPD_LIBRARIES Shared Catalog SqliteConnector Parser Analyzer Planner
-  QueryEngine DataMgr Fragmenter Chunk)
+set(MAPD_LIBRARIES Shared Catalog SqliteConnector Parser Analyzer Planner CsvImport QueryRunner QueryEngine DataMgr Fragmenter Chunk)
+
+if("${MAPD_EDITION_LOWER}" STREQUAL "ee")
+  list(APPEND MAPD_LIBRARIES Distributed)
+endif()
+
+list(APPEND MAPD_LIBRARIES Calcite)
+
+if(ENABLE_RENDERING)
+  list(APPEND MAPD_LIBRARIES "${MAPD_RENDERING_LIBRARIES}")
+endif()
+
+list(APPEND MAPD_LIBRARIES ${Arrow_LIBRARIES})
 
 if(ENABLE_FOLLY)
   list(APPEND MAPD_LIBRARIES ${Folly_LIBRARIES})
 endif()
 
-list(APPEND MAPD_LIBRARIES Calcite)
-
-
-if(ENABLE_ARROW_CONVERTER)
-  list(APPEND MAPD_LIBRARIES ${Arrow_LIBRARIES})
+if(ENABLE_LICENSING_AWS)
+  list(APPEND MAPD_LIBRARIES AWSMarketplace)
 endif()
 
-enable_testing()
-add_subdirectory(Tests)
-add_subdirectory(SampleCode)
+option(ENABLE_TESTS "Build unit tests" ON)
+if (ENABLE_TESTS)
+  enable_testing()
+  add_subdirectory(Tests)
+  add_subdirectory(SampleCode)
+endif()
 
 set(initdb_source_files initdb.cpp)
 add_executable(initdb ${initdb_source_files})
 
-set(mapd_server_source_files MapDServer.cpp ${CMAKE_BINARY_DIR}/MapDRelease.h)
+set(mapd_server_source_files MapDServer.cpp ${CMAKE_BINARY_DIR}/MapDRelease.h ${CMAKE_SOURCE_DIR}/Shared/ConfigResolve.h)
 
 add_executable(mapd_server ${mapd_server_source_files})
 set_target_properties(mapd_server PROPERTIES COMPILE_DEFINITIONS "${TIME_LIMITED_DEFINITIONS}")
@@ -340,19 +438,19 @@ add_custom_command(
     COMMAND mkdir
     ARGS -p ${CMAKE_SOURCE_DIR}/java/thrift/src/gen
     COMMAND ${Thrift_EXECUTABLE}
-    ARGS -gen java -out ${CMAKE_SOURCE_DIR}/java/thrift/src/gen/ ${CMAKE_SOURCE_DIR}/mapd.thrift)
+    ARGS -gen java -r -out ${CMAKE_SOURCE_DIR}/java/thrift/src/gen/ ${CMAKE_SOURCE_DIR}/mapd.thrift)
 
 add_custom_command(
-    DEPENDS ${CMAKE_SOURCE_DIR}/java/thrift/calciteserver.thrift
+    DEPENDS ${CMAKE_SOURCE_DIR}/java/thrift/calciteserver.thrift ${CMAKE_SOURCE_DIR}/completion_hints.thrift
     OUTPUT ${CMAKE_SOURCE_DIR}/java/thrift/src/gen/com/mapd/thrift/calciteserver/CalciteServer.java
     COMMAND mkdir
     ARGS -p ${CMAKE_SOURCE_DIR}/java/thrift/src/gen
     COMMAND ${Thrift_EXECUTABLE}
-    ARGS -gen java -out ${CMAKE_SOURCE_DIR}/java/thrift/src/gen/ ${CMAKE_SOURCE_DIR}/java/thrift/calciteserver.thrift)
+    ARGS -gen java -r -I ${CMAKE_SOURCE_DIR} -out ${CMAKE_SOURCE_DIR}/java/thrift/src/gen/ ${CMAKE_SOURCE_DIR}/java/thrift/calciteserver.thrift)
 list(APPEND ADDITIONAL_MAKE_CLEAN_FILES ${CMAKE_SOURCE_DIR}/java/thrift/src/gen/)
 
 execute_process(
-  COMMAND ${GIT_EXECUTABLE} log -1 --format=%h
+  COMMAND ${GIT_EXECUTABLE} rev-parse --short=10 HEAD
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   OUTPUT_VARIABLE MAPD_GIT_HASH
   OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -375,12 +473,9 @@ add_custom_target(rerun_cmake ALL
   )
 add_dependencies(mapd_server rerun_cmake)
 
-target_link_libraries(mapd_server mapd_thrift thrift_handler ${MAPD_LIBRARIES} ${Boost_LIBRARIES} ${Glog_LIBRARIES} ${CMAKE_DL_LIBS} ${CUDA_LIBRARIES} ${LLVM_LINKER_FLAGS} ${PROFILER_LIBS} ${CURSES_LIBRARIES} ${ZLIB_LIBRARIES} poly2tri)
-if(ENABLE_FOLLY)
-target_link_libraries(initdb Shared Catalog Fragmenter Chunk SqliteConnector DataMgr StringDictionary ${Boost_LIBRARIES} ${Folly_LIBRARIES} ${CMAKE_DL_LIBS})
-else()
-target_link_libraries(initdb Shared Catalog Fragmenter Chunk SqliteConnector DataMgr StringDictionary ${Boost_LIBRARIES} ${CMAKE_DL_LIBS})
-endif()
+target_link_libraries(mapd_server mapd_thrift thrift_handler ${MAPD_LIBRARIES} ${Boost_LIBRARIES} ${Glog_LIBRARIES} ${CMAKE_DL_LIBS} ${CUDA_LIBRARIES} ${LLVM_LINKER_FLAGS} ${PROFILER_LIBS} ${CURSES_LIBRARIES} ${ZLIB_LIBRARIES})
+
+target_link_libraries(initdb mapd_thrift DataMgr ${MAPD_LIBRARIES} ${Boost_LIBRARIES} ${Glog_LIBRARIES} ${CMAKE_DL_LIBS} ${CUDA_LIBRARIES} ${LLVM_LINKER_FLAGS} ${CURSES_LIBRARIES} ${ZLIB_LIBRARIES})
 
 macro(set_dpkg_arch arch_in arch_out)
   if("${arch_in}" STREQUAL "x86_64")
@@ -403,6 +498,7 @@ set(CPACK_STRIP_FILES ON)
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "default-jre-headless | openjdk-8-jre-headless | java8-runtime-headless, bsdmainutils, curl | wget")
 set(CPACK_RPM_PACKAGE_REQUIRES "java-headless, util-linux, curl")
 set(CPACK_RPM_PACKAGE_AUTOREQ OFF)
+set(CPACK_RPM_SPEC_MORE_DEFINE "%define __jar_repack %{nil}")
 if("${MAPD_EDITION_LOWER}" STREQUAL "ee")
   set(CPACK_DEBIAN_PACKAGE_DEPENDS "${CPACK_DEBIAN_PACKAGE_DEPENDS}, libldap-2.4-2")
 endif()
@@ -475,10 +571,12 @@ endif()
 
 # systemd
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
-  install(FILES systemd/mapd_sd_server.service.in systemd/mapd_sd_server@.service.in DESTINATION systemd)
+  if("${MAPD_EDITION_LOWER}" STREQUAL "ee")
+    install(FILES systemd/mapd_sd_server.service.in systemd/mapd_sd_server@.service.in DESTINATION systemd)
+    install(FILES systemd/mapd-sds.conf.in DESTINATION systemd)
+  endif()
   install(FILES systemd/mapd_web_server.service.in systemd/mapd_web_server@.service.in DESTINATION systemd)
   install(FILES systemd/mapd.conf.in DESTINATION systemd)
-  install(FILES systemd/mapd-sds.conf.in DESTINATION systemd)
   install(PROGRAMS systemd/install_mapd_systemd.sh DESTINATION systemd)
 
   if(NOT ENABLE_RENDERING OR "${RENDERER_CONTEXT_TYPE}" STREQUAL "EGL")
@@ -506,7 +604,7 @@ add_custom_command(
     ${CMAKE_BINARY_DIR}/bin/mapd-1.0-SNAPSHOT-jar-with-dependencies.jar
     ${CMAKE_BINARY_DIR}/bin/mapdjdbc-1.0-SNAPSHOT-jar-with-dependencies.jar
     ${CMAKE_BINARY_DIR}/bin/calcite-1.0-SNAPSHOT-jar-with-dependencies.jar
-  COMMAND MVNPATH=${CMAKE_SOURCE_DIR}/java ${MVN_EXECUTABLE} -q install -Dthrift.version="${Thrift_VERSION}"
+  COMMAND MVNPATH=${CMAKE_SOURCE_DIR}/java ${MVN_EXECUTABLE} -q clean install -Dthrift.version="${Thrift_VERSION}"
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/java/mapd/target/mapd-1.0-SNAPSHOT-jar-with-dependencies.jar ${CMAKE_BINARY_DIR}/bin
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/java/mapdjdbc/target/mapdjdbc-1.0-SNAPSHOT-jar-with-dependencies.jar ${CMAKE_BINARY_DIR}/bin
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/java/calcite/target/calcite-1.0-SNAPSHOT-jar-with-dependencies.jar ${CMAKE_BINARY_DIR}/bin
@@ -539,6 +637,7 @@ install(FILES ${CMAKE_BINARY_DIR}/MAPD_GIT_HASH.txt DESTINATION ".")
 if(ENABLE_CUDA)
   install(FILES ${CMAKE_BINARY_DIR}/QueryEngine/cuda_mapd_rt.a DESTINATION QueryEngine)
 endif()
+install(FILES completion_hints.thrift DESTINATION ".")
 install(FILES mapd.thrift DESTINATION ".")
 
 if(NOT PREFER_STATIC_LIBS)
@@ -561,7 +660,10 @@ install(FILES "${EULA_FILE}" DESTINATION ".")
 install(PROGRAMS startmapd DESTINATION ".")
 install(PROGRAMS insert_sample_data DESTINATION ".")
 
-install(DIRECTORY docker/ DESTINATION "docker")
+if("${MAPD_EDITION_LOWER}" STREQUAL "ee")
+  install(DIRECTORY docker/sds DESTINATION "docker")
+endif()
+install(FILES docker/Dockerfile docker/README.md DESTINATION "docker")
 
 exec_program(uname ARGS -m OUTPUT_VARIABLE MAPD_HOST_SYSTEM_ARCHITECTURE) # does not account for cross-compiling or Windows
 set(CPACK_PACKAGE_FILE_NAME "${CMAKE_PROJECT_NAME}-${MAPD_EDITION_LOWER}-${CPACK_PACKAGE_VERSION}-${CMAKE_SYSTEM_NAME}-${MAPD_HOST_SYSTEM_ARCHITECTURE}${MAPD_PACKAGE_FLAGS}")

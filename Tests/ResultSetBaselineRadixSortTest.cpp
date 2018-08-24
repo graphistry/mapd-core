@@ -21,10 +21,10 @@
  *
  * Copyright (c) 2016 MapD Technologies, Inc.  All rights reserved.
  */
-#include "ResultSetTestUtils.h"
 #include "../QueryEngine/ResultRows.h"
 #include "../QueryEngine/ResultSet.h"
 #include "../QueryEngine/RuntimeFunctions.h"
+#include "ResultSetTestUtils.h"
 
 #ifdef HAVE_CUDA
 #include "../CudaMgr/CudaMgr.h"
@@ -52,18 +52,16 @@ std::vector<TargetInfo> get_sort_int_target_infos() {
 QueryMemoryDescriptor baseline_sort_desc(const std::vector<TargetInfo>& target_infos,
                                          const size_t hash_entry_count,
                                          const size_t key_bytewidth) {
-  QueryMemoryDescriptor query_mem_desc{};
-  query_mem_desc.hash_type = GroupByColRangeType::MultiCol;
-  query_mem_desc.group_col_widths.emplace_back(8);
-  query_mem_desc.group_col_widths.emplace_back(8);
+  QueryMemoryDescriptor query_mem_desc(
+      GroupByColRangeType::MultiCol, 0, 0, false, {8, 8});
 #ifdef ENABLE_KEY_COMPACTION
-  query_mem_desc.group_col_compact_width = key_bytewidth;
+  query_mem_desc.setGroupColCompactWidth(key_bytewidth);
 #endif  // ENABLE_KEY_COMPACTION
   static const size_t slot_bytes = 8;
   for (size_t i = 0; i < target_infos.size(); ++i) {
-    query_mem_desc.agg_col_widths.emplace_back(ColWidths{slot_bytes, slot_bytes});
+    query_mem_desc.addAggColWidth(ColWidths{slot_bytes, slot_bytes});
   }
-  query_mem_desc.entry_count = hash_entry_count;
+  query_mem_desc.setEntryCount(hash_entry_count);
   return query_mem_desc;
 }
 
@@ -73,11 +71,11 @@ void fill_storage_buffer_baseline_sort_int(int8_t* buff,
                                            const QueryMemoryDescriptor& query_mem_desc,
                                            const int64_t upper_bound,
                                            const int64_t empty_key) {
-  const auto key_component_count = get_key_count_for_descriptor(query_mem_desc);
+  const auto key_component_count = query_mem_desc.getKeyCount();
   const auto target_slot_count = get_slot_count(target_infos);
   const auto slot_to_target = get_slot_to_target_mapping(target_infos);
   const auto row_bytes = get_row_bytes(query_mem_desc);
-  for (size_t i = 0; i < query_mem_desc.entry_count; ++i) {
+  for (size_t i = 0; i < query_mem_desc.getEntryCount(); ++i) {
     const auto row_ptr = buff + i * row_bytes;
     for (size_t key_comp_idx = 0; key_comp_idx < key_component_count; ++key_comp_idx) {
       reinterpret_cast<K*>(row_ptr)[key_comp_idx] = empty_key;
@@ -87,19 +85,22 @@ void fill_storage_buffer_baseline_sort_int(int8_t* buff,
       CHECK(target_it != slot_to_target.end());
       const auto& target_info = target_infos[target_it->second];
 
-      const auto cols_ptr = reinterpret_cast<int64_t*>(row_ptr + get_slot_off_quad(query_mem_desc) * sizeof(int64_t));
+      const auto cols_ptr = reinterpret_cast<int64_t*>(
+          row_ptr + get_slot_off_quad(query_mem_desc) * sizeof(int64_t));
       cols_ptr[target_slot] = (target_info.agg_kind == kCOUNT ? 0 : 0xdeadbeef);
     }
   }
   std::vector<int64_t> values(upper_bound);
   std::iota(values.begin(), values.end(), 1);
+  const auto null_pattern = null_val_bit_pattern(target_infos.back().sql_type, false);
+  values.push_back(null_pattern);
   std::random_shuffle(values.begin(), values.end());
   CHECK_EQ(size_t(0), row_bytes % 8);
   const auto row_size_quad = row_bytes / 8;
   for (const auto val : values) {
     std::vector<K> key(key_component_count, val);
     auto value_slots = get_group_value(reinterpret_cast<int64_t*>(buff),
-                                       query_mem_desc.entry_count,
+                                       query_mem_desc.getEntryCount(),
                                        reinterpret_cast<const int64_t*>(&key[0]),
                                        key.size(),
                                        sizeof(K),
@@ -114,12 +115,13 @@ void fill_storage_buffer_baseline_sort_fp(int8_t* buff,
                                           const std::vector<TargetInfo>& target_infos,
                                           const QueryMemoryDescriptor& query_mem_desc,
                                           const int64_t upper_bound) {
-  const auto key_component_count = get_key_count_for_descriptor(query_mem_desc);
+  const auto key_component_count = query_mem_desc.getKeyCount();
   const auto i64_buff = reinterpret_cast<int64_t*>(buff);
   const auto target_slot_count = get_slot_count(target_infos);
   const auto slot_to_target = get_slot_to_target_mapping(target_infos);
-  for (size_t i = 0; i < query_mem_desc.entry_count; ++i) {
-    const auto first_key_comp_offset = key_offset_rowwise(i, key_component_count, target_slot_count);
+  for (size_t i = 0; i < query_mem_desc.getEntryCount(); ++i) {
+    const auto first_key_comp_offset =
+        key_offset_rowwise(i, key_component_count, target_slot_count);
     for (size_t key_comp_idx = 0; key_comp_idx < key_component_count; ++key_comp_idx) {
       i64_buff[first_key_comp_offset + key_comp_idx] = EMPTY_KEY_64;
     }
@@ -127,7 +129,8 @@ void fill_storage_buffer_baseline_sort_fp(int8_t* buff,
       auto target_it = slot_to_target.find(target_slot);
       CHECK(target_it != slot_to_target.end());
       const auto& target_info = target_infos[target_it->second];
-      i64_buff[slot_offset_rowwise(i, target_slot, key_component_count, target_slot_count)] =
+      i64_buff[slot_offset_rowwise(
+          i, target_slot, key_component_count, target_slot_count)] =
           (target_info.agg_kind == kCOUNT ? 0 : 0xdeadbeef);
     }
   }
@@ -139,7 +142,7 @@ void fill_storage_buffer_baseline_sort_fp(int8_t* buff,
   for (const auto val : values) {
     std::vector<int64_t> key(key_component_count, val);
     auto value_slots = get_group_value(i64_buff,
-                                       query_mem_desc.entry_count,
+                                       query_mem_desc.getEntryCount(),
                                        &key[0],
                                        key.size(),
                                        sizeof(int64_t),
@@ -151,7 +154,10 @@ void fill_storage_buffer_baseline_sort_fp(int8_t* buff,
 }
 
 template <class T>
-void check_sorted(const ResultSet& result_set, const int64_t bound, const size_t top_n, const size_t desc) {
+void check_sorted(const ResultSet& result_set,
+                  const int64_t bound,
+                  const size_t top_n,
+                  const size_t desc) {
   ASSERT_EQ(top_n, result_set.rowCount());
   T ref_val = bound;
   while (true) {
@@ -196,33 +202,40 @@ int64_t empty_key_val<int32_t>() {
 #endif  // ENABLE_KEY_COMPACTION
 
 template <class K>
-void SortBaselineIntegersTestImpl() {
+void SortBaselineIntegersTestImpl(const bool desc) {
   const auto target_infos = get_sort_int_target_infos();
   const auto query_mem_desc = baseline_sort_desc(target_infos, 400, sizeof(K));
   const auto row_set_mem_owner = std::make_shared<RowSetMemoryOwner>();
   const int64_t upper_bound = 200;
-  std::unique_ptr<ResultSet> rs(
-      new ResultSet(target_infos, ExecutorDeviceType::CPU, query_mem_desc, row_set_mem_owner, nullptr));
+  const int64_t lower_bound = 1;
+  std::unique_ptr<ResultSet> rs(new ResultSet(
+      target_infos, ExecutorDeviceType::CPU, query_mem_desc, row_set_mem_owner, nullptr));
   auto storage = rs->allocateStorage();
-  fill_storage_buffer_baseline_sort_int<K>(
-      storage->getUnderlyingBuffer(), target_infos, query_mem_desc, upper_bound, empty_key_val<K>());
+  fill_storage_buffer_baseline_sort_int<K>(storage->getUnderlyingBuffer(),
+                                           target_infos,
+                                           query_mem_desc,
+                                           upper_bound,
+                                           empty_key_val<K>());
   std::list<Analyzer::OrderEntry> order_entries;
-  const bool desc = true;
   order_entries.emplace_back(3, desc, false);
   const size_t top_n = 5;
   rs->sort(order_entries, top_n);
-  check_sorted<int64_t>(*rs, upper_bound, top_n, desc);
+  check_sorted<int64_t>(*rs, desc ? upper_bound : lower_bound, top_n, desc);
 }
 
 }  // namespace
 
 TEST(SortBaseline, IntegersKey64) {
-  SortBaselineIntegersTestImpl<int64_t>();
+  for (const bool desc : {true, false}) {
+    SortBaselineIntegersTestImpl<int64_t>(desc);
+  }
 }
 
 #ifdef ENABLE_KEY_COMPACTION
 TEST(SortBaseline, IntegersKey32) {
-  SortBaselineIntegersTestImpl<int32_t>();
+  for (const bool desc : {true, false}) {
+    SortBaselineIntegersTestImpl<int32_t>(desc);
+  }
 }
 #endif  // ENABLE_KEY_COMPACTION
 
@@ -233,10 +246,14 @@ TEST(SortBaseline, Floats) {
       const auto query_mem_desc = baseline_sort_desc(target_infos, 400, 8);
       const auto row_set_mem_owner = std::make_shared<RowSetMemoryOwner>();
       const int64_t upper_bound = 200;
-      std::unique_ptr<ResultSet> rs(
-          new ResultSet(target_infos, ExecutorDeviceType::CPU, query_mem_desc, row_set_mem_owner, nullptr));
+      std::unique_ptr<ResultSet> rs(new ResultSet(target_infos,
+                                                  ExecutorDeviceType::CPU,
+                                                  query_mem_desc,
+                                                  row_set_mem_owner,
+                                                  nullptr));
       auto storage = rs->allocateStorage();
-      fill_storage_buffer_baseline_sort_fp(storage->getUnderlyingBuffer(), target_infos, query_mem_desc, upper_bound);
+      fill_storage_buffer_baseline_sort_fp(
+          storage->getUnderlyingBuffer(), target_infos, query_mem_desc, upper_bound);
       std::list<Analyzer::OrderEntry> order_entries;
       order_entries.emplace_back(tle_no, desc, false);
       const size_t top_n = 5;

@@ -22,29 +22,43 @@
 #ifndef _IMPORTER_H_
 #define _IMPORTER_H_
 
-#include <string>
+#include "../Shared/fixautotools.h"
+
+#include <gdal.h>
+#include <glog/logging.h>
+#include <ogrsf_frmts.h>
+
+#include "../Shared/fixautotools.h"
+
+#include <boost/filesystem.hpp>
+#include <boost/noncopyable.hpp>
+#include <boost/tokenizer.hpp>
 #include <cstdio>
 #include <cstdlib>
+#include <iostream>
 #include <list>
 #include <map>
 #include <memory>
-#include <boost/noncopyable.hpp>
-#include <boost/filesystem.hpp>
-#include <boost/tokenizer.hpp>
-#include <glog/logging.h>
-#include <poly2tri/poly2tri.h>
-#include "../Shared/fixautotools.h"
-#include <ogrsf_frmts.h>
-#include <gdal.h>
-#include "../Shared/fixautotools.h"
-#include "../Shared/ShapeDrawData.h"
-#include "../Catalog/TableDescriptor.h"
+#include <string>
 #include "../Catalog/Catalog.h"
+#include "../Catalog/TableDescriptor.h"
+#include "../Chunk/Chunk.h"
 #include "../Fragmenter/Fragmenter.h"
+#include "../Shared/ShapeDrawData.h"
 #include "../Shared/checked_alloc.h"
-#include "../StringDictionary/StringDictionary.h"
+
+// Some builds of boost::geometry require iostream, but don't explicitly include it.
+// Placing in own section to ensure it's included after iostream.
+#include <boost/geometry/index/rtree.hpp>
 
 class TDatum;
+class TColumn;
+
+namespace arrow {
+
+class Array;
+
+}  // namespace arrow
 
 namespace Importer_NS {
 
@@ -62,23 +76,75 @@ struct CopyParams {
   char array_begin;
   char array_end;
   int threads;
-  size_t max_reject;  // maximum number of records that can be rejected before copy is failed
+  size_t
+      max_reject;  // maximum number of records that can be rejected before copy is failed
   TableType table_type;
+  bool plain_text = false;
+  // s3/parquet related params
+  bool is_parquet;
+  std::string s3_access_key;  // per-query credentials to override the
+  std::string s3_secret_key;  // settings in ~/.aws/credentials or environment
+  std::string s3_region;
+  // kafka related params
+  size_t retry_count;
+  size_t retry_wait;
+  size_t batch_size;
+  // geospatial params
+  bool lonlat;
+  EncodingType geo_coords_encoding;
+  int32_t geo_coords_comp_param;
+  SQLTypes geo_coords_type;
+  int32_t geo_coords_srid;
+  bool sanitize_column_names;
 
   CopyParams()
-      : delimiter(','),
-        null_str("\\N"),
-        has_header(true),
-        quoted(true),
-        quote('"'),
-        escape('"'),
-        line_delim('\n'),
-        array_delim(','),
-        array_begin('{'),
-        array_end('}'),
-        threads(0),
-        max_reject(100000),
-        table_type(TableType::DELIMITED) {}
+      : delimiter(',')
+      , null_str("\\N")
+      , has_header(true)
+      , quoted(true)
+      , quote('"')
+      , escape('"')
+      , line_delim('\n')
+      , array_delim(',')
+      , array_begin('{')
+      , array_end('}')
+      , threads(0)
+      , max_reject(100000)
+      , table_type(TableType::DELIMITED)
+      , is_parquet(false)
+      , retry_count(100)
+      , retry_wait(5)
+      , batch_size(1000)
+      , lonlat(true)
+      , geo_coords_encoding(kENCODING_GEOINT)
+      , geo_coords_comp_param(32)
+      , geo_coords_type(kGEOMETRY)
+      , geo_coords_srid(4326)
+      , sanitize_column_names(true) {}
+
+  CopyParams(char d, const std::string& n, char l, size_t b, size_t retries, size_t wait)
+      : delimiter(d)
+      , null_str(n)
+      , has_header(true)
+      , quoted(true)
+      , quote('"')
+      , escape('"')
+      , line_delim(l)
+      , array_delim(',')
+      , array_begin('{')
+      , array_end('}')
+      , threads(0)
+      , max_reject(100000)
+      , table_type(TableType::DELIMITED)
+      , retry_count(retries)
+      , retry_wait(wait)
+      , batch_size(b)
+      , lonlat(true)
+      , geo_coords_encoding(kENCODING_GEOINT)
+      , geo_coords_comp_param(32)
+      , geo_coords_type(kGEOMETRY)
+      , geo_coords_srid(4326)
+      , sanitize_column_names(true) {}
 };
 
 class TypedImportBuffer : boost::noncopyable {
@@ -88,6 +154,9 @@ class TypedImportBuffer : boost::noncopyable {
     switch (col_desc->columnType.get_type()) {
       case kBOOLEAN:
         bool_buffer_ = new std::vector<int8_t>();
+        break;
+      case kTINYINT:
+        tinyint_buffer_ = new std::vector<int8_t>();
         break;
       case kSMALLINT:
         smallint_buffer_ = new std::vector<int16_t>();
@@ -139,6 +208,12 @@ class TypedImportBuffer : boost::noncopyable {
         } else
           array_buffer_ = new std::vector<ArrayDatum>();
         break;
+      case kPOINT:
+      case kLINESTRING:
+      case kPOLYGON:
+      case kMULTIPOLYGON:
+        geo_string_buffer_ = new std::vector<std::string>();
+        break;
       default:
         CHECK(false);
     }
@@ -148,6 +223,9 @@ class TypedImportBuffer : boost::noncopyable {
     switch (column_desc_->columnType.get_type()) {
       case kBOOLEAN:
         delete bool_buffer_;
+        break;
+      case kTINYINT:
+        delete tinyint_buffer_;
         break;
       case kSMALLINT:
         delete smallint_buffer_;
@@ -196,12 +274,20 @@ class TypedImportBuffer : boost::noncopyable {
         } else
           delete array_buffer_;
         break;
+      case kPOINT:
+      case kLINESTRING:
+      case kPOLYGON:
+      case kMULTIPOLYGON:
+        delete geo_string_buffer_;
+        break;
       default:
         CHECK(false);
     }
   }
 
   void addBoolean(const int8_t v) { bool_buffer_->push_back(v); }
+
+  void addTinyint(const int8_t v) { tinyint_buffer_->push_back(v); }
 
   void addSmallint(const int16_t v) { smallint_buffer_->push_back(v); }
 
@@ -215,6 +301,8 @@ class TypedImportBuffer : boost::noncopyable {
 
   void addString(const std::string& v) { string_buffer_->push_back(v); }
 
+  void addGeoString(const std::string& v) { geo_string_buffer_->push_back(v); }
+
   void addArray(const ArrayDatum& v) { array_buffer_->push_back(v); }
 
   std::vector<std::string>& addStringArray() {
@@ -222,7 +310,9 @@ class TypedImportBuffer : boost::noncopyable {
     return string_array_buffer_->back();
   }
 
-  void addStringArray(const std::vector<std::string>& arr) { string_array_buffer_->push_back(arr); }
+  void addStringArray(const std::vector<std::string>& arr) {
+    string_array_buffer_->push_back(arr);
+  }
 
   void addTime(const time_t v) { time_buffer_->push_back(v); }
 
@@ -251,7 +341,8 @@ class TypedImportBuffer : boost::noncopyable {
     }
   }
 
-  void addDictEncodedStringArray(const std::vector<std::vector<std::string>>& string_array_vec) {
+  void addDictEncodedStringArray(
+      const std::vector<std::vector<std::string>>& string_array_vec) {
     CHECK(string_dict_);
     for (auto& p : string_array_vec) {
       size_t len = p.size() * sizeof(int32_t);
@@ -262,7 +353,8 @@ class TypedImportBuffer : boost::noncopyable {
         }
       }
       string_dict_->getOrAddBulk(p, a);
-      string_array_dict_buffer_->push_back(ArrayDatum(len, reinterpret_cast<int8_t*>(a), len == 0));
+      string_array_dict_buffer_->push_back(
+          ArrayDatum(len, reinterpret_cast<int8_t*>(a), len == 0));
     }
   }
 
@@ -276,6 +368,8 @@ class TypedImportBuffer : boost::noncopyable {
     switch (column_desc_->columnType.get_type()) {
       case kBOOLEAN:
         return reinterpret_cast<int8_t*>(&((*bool_buffer_)[0]));
+      case kTINYINT:
+        return reinterpret_cast<int8_t*>(&((*tinyint_buffer_)[0]));
       case kSMALLINT:
         return reinterpret_cast<int8_t*>(&((*smallint_buffer_)[0]));
       case kINT:
@@ -301,6 +395,8 @@ class TypedImportBuffer : boost::noncopyable {
     switch (column_desc_->columnType.get_type()) {
       case kBOOLEAN:
         return sizeof((*bool_buffer_)[0]);
+      case kTINYINT:
+        return sizeof((*tinyint_buffer_)[0]);
       case kSMALLINT:
         return sizeof((*smallint_buffer_)[0]);
       case kINT:
@@ -324,11 +420,17 @@ class TypedImportBuffer : boost::noncopyable {
 
   std::vector<std::string>* getStringBuffer() const { return string_buffer_; }
 
+  std::vector<std::string>* getGeoStringBuffer() const { return geo_string_buffer_; }
+
   std::vector<ArrayDatum>* getArrayBuffer() const { return array_buffer_; }
 
-  std::vector<std::vector<std::string>>* getStringArrayBuffer() const { return string_array_buffer_; }
+  std::vector<std::vector<std::string>>* getStringArrayBuffer() const {
+    return string_array_buffer_;
+  }
 
-  std::vector<ArrayDatum>* getStringArrayDictBuffer() const { return string_array_dict_buffer_; }
+  std::vector<ArrayDatum>* getStringArrayDictBuffer() const {
+    return string_array_dict_buffer_;
+  }
 
   int8_t* getStringDictBuffer() const {
     switch (column_desc_->columnType.get_size()) {
@@ -353,6 +455,10 @@ class TypedImportBuffer : boost::noncopyable {
     switch (column_desc_->columnType.get_type()) {
       case kBOOLEAN: {
         bool_buffer_->clear();
+        break;
+      }
+      case kTINYINT: {
+        tinyint_buffer_->clear();
         break;
       }
       case kSMALLINT: {
@@ -412,18 +518,41 @@ class TypedImportBuffer : boost::noncopyable {
           array_buffer_->clear();
         break;
       }
+      case kPOINT:
+      case kLINESTRING:
+      case kPOLYGON:
+      case kMULTIPOLYGON:
+        geo_string_buffer_->clear();
+        break;
       default:
         CHECK(false);
     }
   }
 
-  void add_value(const ColumnDescriptor* cd, const std::string& val, const bool is_null, const CopyParams& copy_params);
-  void add_value(const ColumnDescriptor* cd, const TDatum& val, const bool is_null);
+  size_t add_values(const ColumnDescriptor* cd, const TColumn& data);
+
+  size_t add_arrow_values(const ColumnDescriptor* cd, const arrow::Array& data);
+
+  void add_value(const ColumnDescriptor* cd,
+                 const std::string& val,
+                 const bool is_null,
+                 const CopyParams& copy_params,
+                 const int64_t replicate_count = 0);
+  void add_value(const ColumnDescriptor* cd,
+                 const TDatum& val,
+                 const bool is_null,
+                 const int64_t replicate_count = 0);
   void pop_value();
+
+  inline int64_t get_replicate_count() const { return replicate_count_; }
+  inline void set_replicate_count(const int64_t replicate_count) {
+    replicate_count_ = replicate_count;
+  }
 
  private:
   union {
     std::vector<int8_t>* bool_buffer_;
+    std::vector<int8_t>* tinyint_buffer_;
     std::vector<int16_t>* smallint_buffer_;
     std::vector<int32_t>* int_buffer_;
     std::vector<int64_t>* bigint_buffer_;
@@ -431,6 +560,7 @@ class TypedImportBuffer : boost::noncopyable {
     std::vector<double>* double_buffer_;
     std::vector<time_t>* time_buffer_;
     std::vector<std::string>* string_buffer_;
+    std::vector<std::string>* geo_string_buffer_;
     std::vector<ArrayDatum>* array_buffer_;
     std::vector<std::vector<std::string>>* string_array_buffer_;
   };
@@ -442,33 +572,49 @@ class TypedImportBuffer : boost::noncopyable {
   };
   const ColumnDescriptor* column_desc_;
   StringDictionary* string_dict_;
+  size_t replicate_count_ = 0;
 };
 
 class Loader {
  public:
-  Loader(const Catalog_Namespace::Catalog& c, const TableDescriptor* t)
-      : catalog(c), table_desc(t), column_descs(c.getAllColumnMetadataForTable(t->tableId, false, false)) {
+  Loader(Catalog_Namespace::Catalog& c, const TableDescriptor* t)
+      : catalog(c)
+      , table_desc(t)
+      , column_descs(c.getAllColumnMetadataForTable(t->tableId, false, false, true)) {
     init();
   };
-  const Catalog_Namespace::Catalog& get_catalog() const { return catalog; }
+  Catalog_Namespace::Catalog& get_catalog() { return catalog; }
   const TableDescriptor* get_table_desc() const { return table_desc; }
-  const std::list<const ColumnDescriptor*>& get_column_descs() const { return column_descs; }
+  const std::list<const ColumnDescriptor*>& get_column_descs() const {
+    return column_descs;
+  }
   const Fragmenter_Namespace::InsertData& get_insert_data() const { return insert_data; }
   StringDictionary* get_string_dict(const ColumnDescriptor* cd) const {
-    if ((cd->columnType.get_type() != kARRAY || !IS_STRING(cd->columnType.get_subtype())) &&
-        (!cd->columnType.is_string() || cd->columnType.get_compression() != kENCODING_DICT))
+    if ((cd->columnType.get_type() != kARRAY ||
+         !IS_STRING(cd->columnType.get_subtype())) &&
+        (!cd->columnType.is_string() ||
+         cd->columnType.get_compression() != kENCODING_DICT))
       return nullptr;
     return dict_map.at(cd->columnId);
   }
-  virtual bool load(const std::vector<std::unique_ptr<TypedImportBuffer>>& import_buffers, size_t row_count);
-  virtual bool loadNoCheckpoint(const std::vector<std::unique_ptr<TypedImportBuffer>>& import_buffers,
-                                size_t row_count);
-  virtual bool loadImpl(const std::vector<std::unique_ptr<TypedImportBuffer>>& import_buffers,
-                        size_t row_count,
-                        bool checkpoint);
+  virtual bool load(const std::vector<std::unique_ptr<TypedImportBuffer>>& import_buffers,
+                    size_t row_count);
+  virtual bool loadNoCheckpoint(
+      const std::vector<std::unique_ptr<TypedImportBuffer>>& import_buffers,
+      size_t row_count);
+  virtual bool loadImpl(
+      const std::vector<std::unique_ptr<TypedImportBuffer>>& import_buffers,
+      size_t row_count,
+      bool checkpoint);
+  virtual void checkpoint();
+  virtual int32_t getTableEpoch();
+  virtual void setTableEpoch(const int32_t new_epoch);
+  inline void set_replicating(const bool replicating) { replicating_ = replicating; }
+  inline bool get_replicating() const { return replicating_; }
+  virtual ~Loader() {}
 
  protected:
-  const Catalog_Namespace::Catalog& catalog;
+  Catalog_Namespace::Catalog& catalog;
   const TableDescriptor* table_desc;
   std::list<const ColumnDescriptor*> column_descs;
   Fragmenter_Namespace::InsertData insert_data;
@@ -486,17 +632,68 @@ class Loader {
                    size_t row_count,
                    const TableDescriptor* shard_table,
                    bool checkpoint);
+  bool replicating_ = false;
+  std::mutex loader_mutex_;
 };
 
-class Detector {
+struct ImportStatus {
+  std::chrono::steady_clock::time_point start;
+  std::chrono::steady_clock::time_point end;
+  size_t rows_completed;
+  size_t rows_estimated;
+  size_t rows_rejected;
+  std::chrono::duration<size_t, std::milli> elapsed;
+  bool load_truncated;
+  int thread_id;  // to recall thread_id after thread exit
+  ImportStatus()
+      : start(std::chrono::steady_clock::now())
+      , rows_completed(0)
+      , rows_estimated(0)
+      , rows_rejected(0)
+      , elapsed(0)
+      , load_truncated(0)
+      , thread_id(0) {}
+
+  ImportStatus& operator+=(const ImportStatus& is) {
+    rows_completed += is.rows_completed;
+    rows_rejected += is.rows_rejected;
+
+    return *this;
+  }
+};
+
+class DataStreamSink {
  public:
-  Detector(const boost::filesystem::path& fp, CopyParams& cp) : file_path(fp), copy_params(cp) {
+  DataStreamSink() {}
+  DataStreamSink(const CopyParams& copy_params, const std::string file_path)
+      : copy_params(copy_params), file_path(file_path) {}
+  virtual ~DataStreamSink() {}
+  virtual ImportStatus importDelimited(const std::string& file_path,
+                                       const bool decompressed) = 0;
+  const CopyParams& get_copy_params() const { return copy_params; }
+  void import_local_parquet(const std::string& file_path);
+  void import_parquet(std::vector<std::string>& file_paths);
+  void import_compressed(std::vector<std::string>& file_paths);
+
+ protected:
+  ImportStatus archivePlumber();
+
+  CopyParams copy_params;
+  const std::string file_path;
+  FILE* p_file = nullptr;
+  ImportStatus import_status;
+  bool load_failed = false;
+};
+
+class Detector : public DataStreamSink {
+ public:
+  Detector(const boost::filesystem::path& fp, CopyParams& cp)
+      : DataStreamSink(cp, fp.string()), file_path(fp) {
     read_file();
     init();
   };
   static SQLTypes detect_sqltype(const std::string& str);
   std::vector<std::string> get_headers();
-  const CopyParams& get_copy_params() const { return copy_params; }
   std::vector<std::vector<std::string>> raw_rows;
   std::vector<std::vector<std::string>> get_sample_rows(size_t n);
   std::vector<SQLTypes> best_sqltypes;
@@ -511,195 +708,174 @@ class Detector {
   std::vector<SQLTypes> detect_column_types(const std::vector<std::string>& row);
   static bool more_restrictive_sqltype(const SQLTypes a, const SQLTypes b);
   void find_best_sqltypes();
-  std::vector<SQLTypes> find_best_sqltypes(const std::vector<std::vector<std::string>>& raw_rows,
-                                           const CopyParams& copy_params);
-  std::vector<SQLTypes> find_best_sqltypes(const std::vector<std::vector<std::string>>::const_iterator& row_begin,
-                                           const std::vector<std::vector<std::string>>::const_iterator& row_end,
-                                           const CopyParams& copy_params);
+  std::vector<SQLTypes> find_best_sqltypes(
+      const std::vector<std::vector<std::string>>& raw_rows,
+      const CopyParams& copy_params);
+  std::vector<SQLTypes> find_best_sqltypes(
+      const std::vector<std::vector<std::string>>::const_iterator& row_begin,
+      const std::vector<std::vector<std::string>>::const_iterator& row_end,
+      const CopyParams& copy_params);
 
-  std::vector<EncodingType> find_best_encodings(const std::vector<std::vector<std::string>>::const_iterator& row_begin,
-                                                const std::vector<std::vector<std::string>>::const_iterator& row_end,
-                                                const std::vector<SQLTypes>& best_types);
+  std::vector<EncodingType> find_best_encodings(
+      const std::vector<std::vector<std::string>>::const_iterator& row_begin,
+      const std::vector<std::vector<std::string>>::const_iterator& row_end,
+      const std::vector<SQLTypes>& best_types);
 
   void detect_headers();
   bool detect_headers(const std::vector<std::vector<std::string>>& raw_rows);
-  bool detect_headers(const std::vector<SQLTypes>& first_types, const std::vector<SQLTypes>& rest_types);
+  bool detect_headers(const std::vector<SQLTypes>& first_types,
+                      const std::vector<SQLTypes>& rest_types);
   void find_best_sqltypes_and_headers();
+  ImportStatus importDelimited(const std::string& file_path, const bool decompressed);
   std::string raw_data;
   boost::filesystem::path file_path;
   std::chrono::duration<double> timeout{1};
-  CopyParams copy_params;
+  std::string line1;
 };
 
-struct ImportStatus {
-  std::chrono::steady_clock::time_point start;
-  std::chrono::steady_clock::time_point end;
-  size_t rows_completed;
-  size_t rows_estimated;
-  size_t rows_rejected;
-  std::chrono::duration<size_t, std::milli> elapsed;
-  bool load_truncated;
-  ImportStatus()
-      : start(std::chrono::steady_clock::now()),
-        rows_completed(0),
-        rows_estimated(0),
-        rows_rejected(0),
-        elapsed(0),
-        load_truncated(0) {}
+class ImporterUtils {
+ public:
+  static void parseStringArray(const std::string& s,
+                               const CopyParams& copy_params,
+                               std::vector<std::string>& string_vec) {
+    if (s == copy_params.null_str || s.size() < 1) {
+      return;
+    }
+    if (s[0] != copy_params.array_begin || s[s.size() - 1] != copy_params.array_end) {
+      throw std::runtime_error("Malformed Array :" + s);
+    }
+    size_t last = 1;
+    for (size_t i = s.find(copy_params.array_delim, 1); i != std::string::npos;
+         i = s.find(copy_params.array_delim, last)) {
+      if (i > last) {  // if not empty string - disallow empty strings for now
+        if (s.substr(last, i - last).length() > StringDictionary::MAX_STRLEN)
+          throw std::runtime_error("Array String too long : " +
+                                   std::to_string(s.substr(last, i - last).length()) +
+                                   " max is " +
+                                   std::to_string(StringDictionary::MAX_STRLEN));
 
-  ImportStatus& operator+=(const ImportStatus& is) {
-    rows_completed += is.rows_completed;
-    rows_rejected += is.rows_rejected;
+        string_vec.push_back(s.substr(last, i - last));
+      }
+      last = i + 1;
+    }
+    if (s.size() - 1 > last) {  // if not empty string - disallow empty strings for now
+      if (s.substr(last, s.size() - 1 - last).length() > StringDictionary::MAX_STRLEN)
+        throw std::runtime_error(
+            "Array String too long : " +
+            std::to_string(s.substr(last, s.size() - 1 - last).length()) + " max is " +
+            std::to_string(StringDictionary::MAX_STRLEN));
 
-    return *this;
+      string_vec.push_back(s.substr(last, s.size() - 1 - last));
+    }
   }
 };
 
-struct PolyData2d {
-  std::vector<double> coords;
-  std::vector<unsigned int> triangulation_indices;
-  std::vector<Rendering::GL::Resources::IndirectDrawVertexData> lineDrawInfo;
-  std::vector<Rendering::GL::Resources::IndirectDrawIndexData> polyDrawInfo;
-
-  PolyData2d(unsigned int startVert = 0, unsigned int startIdx = 0)
-      : _ended(true), _startVert(startVert), _startIdx(startIdx), _startTriIdx(0) {}
-  ~PolyData2d() {}
-
-  size_t numVerts() const { return coords.size() / 2; }
-  size_t numLineLoops() const { return lineDrawInfo.size(); }
-  size_t numTris() const {
-    CHECK(triangulation_indices.size() % 3 == 0);
-    return triangulation_indices.size() / 3;
-  }
-  size_t numIndices() const { return triangulation_indices.size(); }
-
-  unsigned int startVert() const { return _startVert; }
-  unsigned int startIdx() const { return _startIdx; }
-
-  void beginPoly() {
-    assert(_ended);
-    _ended = false;
-    _startTriIdx = numVerts() - lineDrawInfo.back().count;
-
-    if (!polyDrawInfo.size()) {
-      // polyDrawInfo.emplace_back(0, _startIdx + triangulation_indices.size(), lineDrawInfo.back().firstIndex);
-      polyDrawInfo.emplace_back(0, _startIdx, _startVert);
-    }
-  }
-
-  void endPoly() {
-    assert(!_ended);
-    _ended = true;
-  }
-
-  void beginLine() {
-    assert(_ended);
-    _ended = false;
-
-    lineDrawInfo.emplace_back(0, _startVert + numVerts());
-  }
-
-  void addLinePoint(const std::shared_ptr<p2t::Point>& vertPtr) {
-    _addPoint(vertPtr->x, vertPtr->y);
-    lineDrawInfo.back().count++;
-  }
-
-  bool endLine() {
-    bool rtn = false;
-    auto& lineDrawItem = lineDrawInfo.back();
-    size_t idx0 = (lineDrawItem.firstIndex - _startVert) * 2;
-    size_t idx1 = idx0 + (lineDrawItem.count - 1) * 2;
-    if (coords[idx0] == coords[idx1] && coords[idx0 + 1] == coords[idx1 + 1]) {
-      coords.pop_back();
-      coords.pop_back();
-      lineDrawItem.count--;
-      rtn = true;
-    }
-
-    // repeat the first 3 vertices to fully create the "loop"
-    // since it will be drawn using the GL_LINE_STRIP_ADJACENCY
-    // primitive type
-    int num = lineDrawItem.count;
-    for (int i = 0; i < 3; ++i) {
-      int idx = (idx0 + ((i % num) * 2));
-      coords.push_back(coords[idx]);
-      coords.push_back(coords[idx + 1]);
-    }
-    lineDrawItem.count += 3;
-
-    // add an empty coord as a separator
-    // coords.push_back(-10000000.0);
-    // coords.push_back(-10000000.0);
-
-    _ended = true;
-    return rtn;
-  }
-
-  void addTriangle(unsigned int idx0, unsigned int idx1, unsigned int idx2) {
-    // triangulation_indices.push_back(idx0);
-    // triangulation_indices.push_back(idx1);
-    // triangulation_indices.push_back(idx2);
-
-    triangulation_indices.push_back(_startTriIdx + idx0);
-    triangulation_indices.push_back(_startTriIdx + idx1);
-    triangulation_indices.push_back(_startTriIdx + idx2);
-
-    polyDrawInfo.back().count += 3;
-  }
+class RenderGroupAnalyzer {
+ public:
+  RenderGroupAnalyzer() : _numRenderGroups(0) {}
+  void seedFromExistingTableContents(const std::unique_ptr<Loader>& loader,
+                                     const std::string& geoColumnBaseName);
+  int insertBoundsAndReturnRenderGroup(const std::vector<double>& bounds);
 
  private:
-  bool _ended;
-  unsigned int _startVert;
-  unsigned int _startIdx;
-  unsigned int _startTriIdx;
-
-  void _addPoint(double x, double y) {
-    coords.push_back(x);
-    coords.push_back(y);
-  }
+  using Point = boost::geometry::model::point<double, 2, boost::geometry::cs::cartesian>;
+  using BoundingBox = boost::geometry::model::box<Point>;
+  using Node = std::pair<BoundingBox, int>;
+  boost::geometry::index::rtree<Node, boost::geometry::index::quadratic<16>> _rtree;
+  std::mutex _rtreeMutex;
+  int _numRenderGroups;
 };
 
-class Importer {
+class Importer : public DataStreamSink {
  public:
-  Importer(const Catalog_Namespace::Catalog& c, const TableDescriptor* t, const std::string& f, const CopyParams& p);
+  Importer(Catalog_Namespace::Catalog& c,
+           const TableDescriptor* t,
+           const std::string& f,
+           const CopyParams& p);
   Importer(Loader* providedLoader, const std::string& f, const CopyParams& p);
   ~Importer();
   ImportStatus import();
-  ImportStatus importDelimited();
-  ImportStatus importShapefile();
+  ImportStatus importDelimited(const std::string& file_path, const bool decompressed);
   ImportStatus importGDAL(std::map<std::string, std::string> colname_to_src);
   const CopyParams& get_copy_params() const { return copy_params; }
-  const std::list<const ColumnDescriptor*>& get_column_descs() const { return loader->get_column_descs(); }
-  void load(const std::vector<std::unique_ptr<TypedImportBuffer>>& import_buffers, size_t row_count);
-  std::vector<std::vector<std::unique_ptr<TypedImportBuffer>>>& get_import_buffers_vec() { return import_buffers_vec; }
-  std::vector<std::unique_ptr<TypedImportBuffer>>& get_import_buffers(int i) { return import_buffers_vec[i]; }
+  const std::list<const ColumnDescriptor*>& get_column_descs() const {
+    return loader->get_column_descs();
+  }
+  void load(const std::vector<std::unique_ptr<TypedImportBuffer>>& import_buffers,
+            size_t row_count);
+  std::vector<std::vector<std::unique_ptr<TypedImportBuffer>>>& get_import_buffers_vec() {
+    return import_buffers_vec;
+  }
+  std::vector<std::unique_ptr<TypedImportBuffer>>& get_import_buffers(int i) {
+    return import_buffers_vec[i];
+  }
   const bool* get_is_array() const { return is_array_a.get(); }
   static ImportStatus get_import_status(const std::string& id);
   static void set_import_status(const std::string& id, const ImportStatus is);
-  static const std::list<ColumnDescriptor> gdalToColumnDescriptors(const std::string& fileName);
-  static void readMetadataSampleGDAL(const std::string& fileName,
-                                     std::map<std::string, std::vector<std::string>>& metadata,
-                                     int rowLimit);
+  static const std::list<ColumnDescriptor> gdalToColumnDescriptors(
+      const std::string& fileName,
+      const std::string& geoColumnName,
+      const CopyParams& copy_params);
+  static void readMetadataSampleGDAL(
+      const std::string& fileName,
+      const std::string& geoColumnName,
+      std::map<std::string, std::vector<std::string>>& metadata,
+      int rowLimit,
+      const CopyParams& copy_params);
+  static bool gdalFileExists(const std::string& path, const CopyParams& copy_params);
+  static bool gdalFileOrDirectoryExists(const std::string& path,
+                                        const CopyParams& copy_params);
+  static std::vector<std::string> gdalGetAllFilesInArchive(
+      const std::string& archive_path,
+      const CopyParams& copy_params);
+  static bool gdalSupportsNetworkFileAccess();
+  Catalog_Namespace::Catalog& get_catalog() { return loader->get_catalog(); }
+  static void set_geo_physical_import_buffer(
+      const Catalog_Namespace::Catalog& catalog,
+      const ColumnDescriptor* cd,
+      std::vector<std::unique_ptr<TypedImportBuffer>>& import_buffers,
+      size_t& col_idx,
+      std::vector<double>& coords,
+      std::vector<double>& bounds,
+      std::vector<int>& ring_sizes,
+      std::vector<int>& poly_rings,
+      int render_group,
+      const int64_t replicate_count = 0);
 
  private:
-  void readVerticesFromGDAL(const std::string& fileName,
-                            std::vector<PolyData2d>& polys,
-                            std::pair<std::map<std::string, size_t>, std::vector<std::vector<std::string>>>& metadata);
-  void readVerticesFromGDALGeometryZ(const std::string& fileName, OGRPolygon* poPolygon, PolyData2d& poly, bool hasZ);
-  void initGDAL();
-  const std::string& file_path;
+  static void initGDAL();
+  static bool gdalStatInternal(const std::string& path,
+                               const CopyParams& copy_params,
+                               bool also_dir);
+  static OGRDataSource* openGDALDataset(const std::string& fileName,
+                                        const CopyParams& copy_params);
+  static void setGDALAuthorizationTokens(const CopyParams& copy_params);
   std::string import_id;
-  const CopyParams& copy_params;
   size_t file_size;
-  int max_threads;
-  FILE* p_file;
+  size_t max_threads;
   char* buffer[2];
-  int which_buf;
   std::vector<std::vector<std::unique_ptr<TypedImportBuffer>>> import_buffers_vec;
   std::unique_ptr<Loader> loader;
-  bool load_failed;
   std::unique_ptr<bool[]> is_array_a;
-  ImportStatus import_status;
+  static std::mutex init_gdal_mutex;
 };
+
+class ImportDriver {
+ public:
+  ImportDriver(std::shared_ptr<Catalog_Namespace::Catalog> c,
+               const Catalog_Namespace::UserMetadata& user,
+               const ExecutorDeviceType t = ExecutorDeviceType::GPU)
+      : session_(new Catalog_Namespace::SessionInfo(c, user, t, "")) {}
+
+  void import_geo_table(const std::string& file_path,
+                        const std::string& table_name,
+                        const bool compression = true,
+                        const bool create_table = true);
+
+ private:
+  std::unique_ptr<Catalog_Namespace::SessionInfo> session_;
 };
+
+}  // namespace Importer_NS
+
 #endif  // _IMPORTER_H_

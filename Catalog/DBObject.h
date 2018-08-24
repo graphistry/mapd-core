@@ -29,71 +29,187 @@
 #ifndef DBOBJECT_H
 #define DBOBJECT_H
 
-#include "../Shared/types.h"
-
-#include <unordered_set>
-#include <string>
 #include <glog/logging.h>
+#include <string>
+#include <unordered_set>
 
-// DB objects for which privileges are currently supported
+namespace Catalog_Namespace {
+class Catalog;
+}
+
+// DB objects for which privileges are currently supported, only ever add enums, never
+// remove as the nums are persisted in the catalog DB
 enum DBObjectType {
   AbstractDBObjectType = 0,
   DatabaseDBObjectType,
   TableDBObjectType,
-  ColumnDBObjectType,
-  DashboardDBObjectType
+  DashboardDBObjectType,
+  ViewDBObjectType
+};
+
+std::string DBObjectTypeToString(DBObjectType type);
+DBObjectType DBObjectTypeFromString(const std::string& type);
+
+struct DBObjectKey {
+  int32_t permissionType = -1;
+  int32_t dbId = -1;
+  int32_t objectId = -1;
+
+  static const size_t N_COLUMNS = 3;
+
+  bool operator<(const DBObjectKey& key) const {
+    int32_t ids_a[N_COLUMNS] = {permissionType, dbId, objectId};
+    int32_t ids_b[N_COLUMNS] = {key.permissionType, key.dbId, key.objectId};
+    return memcmp(ids_a, ids_b, N_COLUMNS * sizeof(int32_t)) < 0;
+  }
+
+  static DBObjectKey fromString(const std::vector<std::string>& key,
+                                const DBObjectType& type);
 };
 
 // Access privileges currently supported
-class AccessPrivileges {
- public:
-  bool select_;
-  bool insert_;
-  bool create_;
-  /* following privileges may be added on as needed basis
-  bool update_;
-  bool delete_;
-  bool trancate_;
-  bool references_;
-  bool trigger_;
-  bool connect_;
-  bool temporary_;
-  bool execute_;
-  bool usage_;
-  */
+
+struct DatabasePrivileges {
+  static const int32_t ALL = -1;
+  static const int32_t CREATE_DATABASE = 1 << 0;
+  static const int32_t DROP_DATABASE = 1 << 1;
+  static const int32_t VIEW_SQL_EDITOR = 1 << 2;
+};
+
+struct TablePrivileges {
+  static const int32_t ALL = -1;
+  static const int32_t CREATE_TABLE = 1 << 0;
+  static const int32_t DROP_TABLE = 1 << 1;
+  static const int32_t SELECT_FROM_TABLE = 1 << 2;
+  static const int32_t INSERT_INTO_TABLE = 1 << 3;
+  static const int32_t UPDATE_IN_TABLE = 1 << 4;
+  static const int32_t DELETE_FROM_TABLE = 1 << 5;
+  static const int32_t TRUNCATE_TABLE = 1 << 6;
+  static const int32_t ALTER_TABLE = 1 << 7;
+
+  static const int32_t ALL_MIGRATE =
+      CREATE_TABLE | DROP_TABLE | SELECT_FROM_TABLE | INSERT_INTO_TABLE;
+};
+
+struct DashboardPrivileges {
+  static const int32_t ALL = -1;
+  static const int32_t CREATE_DASHBOARD = 1 << 0;
+  static const int32_t DELETE_DASHBOARD = 1 << 1;
+  static const int32_t VIEW_DASHBOARD = 1 << 2;
+  static const int32_t EDIT_DASHBOARD = 1 << 3;
+
+  static const int32_t ALL_MIGRATE =
+      CREATE_DASHBOARD | DELETE_DASHBOARD | VIEW_DASHBOARD | EDIT_DASHBOARD;
+};
+
+struct ViewPrivileges {
+  static const int32_t ALL = -1;
+  static const int32_t CREATE_VIEW = 1 << 0;
+  static const int32_t DROP_VIEW = 1 << 1;
+  static const int32_t SELECT_FROM_VIEW = 1 << 2;
+  static const int32_t INSERT_INTO_VIEW = 1 << 3;
+  static const int32_t UPDATE_IN_VIEW = 1 << 4;
+  static const int32_t DELETE_FROM_VIEW = 1 << 5;
+  static const int32_t TRUNCATE_VIEW = 1 << 6;
+
+  static const int32_t ALL_MIGRATE =
+      CREATE_VIEW | DROP_VIEW | SELECT_FROM_VIEW | INSERT_INTO_VIEW;
+};
+
+struct AccessPrivileges {
+  int64_t privileges;
+
+  AccessPrivileges() : privileges(0) {}
+
+  AccessPrivileges(int64_t priv) : privileges(priv) {}
+
+  void reset() { privileges = 0L; }
+  bool hasAny() const { return 0L != privileges; }
+  bool hasPermission(int permission) const {
+    return permission == (privileges & permission);
+  }
+
+  void add(AccessPrivileges newprivs) { privileges |= newprivs.privileges; }
+  void remove(AccessPrivileges newprivs) { privileges &= ~(newprivs.privileges); }
+
+  static const AccessPrivileges NONE;
+
+  // database permissions
+  static const AccessPrivileges ALL_DATABASE;
+  static const AccessPrivileges VIEW_SQL_EDITOR;
+
+  // table permissions
+  static const AccessPrivileges ALL_TABLE_MIGRATE;
+  static const AccessPrivileges ALL_TABLE;
+  static const AccessPrivileges CREATE_TABLE;
+  static const AccessPrivileges DROP_TABLE;
+  static const AccessPrivileges SELECT_FROM_TABLE;
+  static const AccessPrivileges INSERT_INTO_TABLE;
+  static const AccessPrivileges UPDATE_IN_TABLE;
+  static const AccessPrivileges DELETE_FROM_TABLE;
+  static const AccessPrivileges TRUNCATE_TABLE;
+  static const AccessPrivileges ALTER_TABLE;
+
+  // dashboard permissions
+  static const AccessPrivileges ALL_DASHBOARD_MIGRATE;
+  static const AccessPrivileges ALL_DASHBOARD;
+  static const AccessPrivileges CREATE_DASHBOARD;
+  static const AccessPrivileges VIEW_DASHBOARD;
+  static const AccessPrivileges EDIT_DASHBOARD;
+  static const AccessPrivileges DELETE_DASHBOARD;
+
+  // view permissions
+  static const AccessPrivileges ALL_VIEW_MIGRATE;
+  static const AccessPrivileges ALL_VIEW;
+  static const AccessPrivileges CREATE_VIEW;
+  static const AccessPrivileges DROP_VIEW;
+  static const AccessPrivileges SELECT_FROM_VIEW;
+  static const AccessPrivileges INSERT_INTO_VIEW;
+  static const AccessPrivileges UPDATE_IN_VIEW;
+  static const AccessPrivileges DELETE_FROM_VIEW;
+  static const AccessPrivileges TRUNCATE_VIEW;
 };
 
 class DBObject {
  public:
-  DBObject(const std::string& name, const DBObjectType& type);
+  DBObject(const std::string& name, const DBObjectType& objectAndPermissionType);
+  DBObject(const int32_t id, const DBObjectType& objectAndPermissionType);
+  DBObject(DBObjectKey key, AccessPrivileges privs, int32_t owner)
+      : objectName_("")
+      , objectType_(AbstractDBObjectType)
+      , objectKey_(key)
+      , objectPrivs_(privs)
+      , ownerId_(owner){};
   DBObject(const DBObject& object);
-  ~DBObject();
+  ~DBObject() {}
 
-  std::string getName() const;
-  DBObjectType getType() const;
-  DBObjectKey getObjectKey() const;
-  std::vector<bool> getPrivileges() const;
-  void setObjectKey(const DBObjectKey& objectKey);
-  void setPrivileges(const std::vector<bool> priv);
+  void setObjectType(const DBObjectType& objectType);
+  void setName(std::string name) { objectName_ = name; }
+  std::string getName() const { return objectName_; }
+  DBObjectKey getObjectKey() const {
+    CHECK(-1 != objectKey_.dbId); /** load key not called? */
+    return objectKey_;
+  }
+  void setObjectKey(const DBObjectKey& objectKey) { objectKey_ = objectKey; }
+  const AccessPrivileges& getPrivileges() const { return objectPrivs_; }
+  void setPrivileges(const AccessPrivileges& privs) { objectPrivs_ = privs; }
+  void resetPrivileges() { objectPrivs_.reset(); }
   void copyPrivileges(const DBObject& object);
   void updatePrivileges(const DBObject& object);
-  void grantPrivileges(const DBObject& object);
+  void grantPrivileges(const DBObject& object) { updatePrivileges(object); }
   void revokePrivileges(const DBObject& object);
-  bool isUserPrivateObject() const;
-  void setUserPrivateObject();
-  int32_t getOwningUserId() const;
-  void setOwningUserId(int32_t userId);
+  void setPermissionType(const DBObjectType& permissionType);
+  int32_t getOwner() const { return ownerId_; }
+  void setOwner(int32_t userId) { ownerId_ = userId; }
+  std::vector<std::string> toString() const;
+  void loadKey(const Catalog_Namespace::Catalog& catalog);
 
  private:
   std::string objectName_;
   DBObjectType objectType_;
   DBObjectKey objectKey_;
   AccessPrivileges objectPrivs_;
-  bool privsValid_;
-  bool userPrivateObject_;  // false if not use private
-  int32_t owningUserId_;    // 0 - if not owned by user
-
-  friend class UserRole;
+  int32_t ownerId_;  // 0 - if not owned by user
 };
 
 #endif /* DBOBJECT_H */

@@ -16,22 +16,26 @@
 
 #ifndef COLUMNAR_RESULTS_H
 #define COLUMNAR_RESULTS_H
-#include "ResultRows.h"
 #include "IteratorTable.h"
+#include "ResultSet.h"
 #include "SqlTypesLayout.h"
 
 #include "../Shared/checked_alloc.h"
 
+#include <memory>
+#include <unordered_map>
+
 class ColumnarConversionNotSupported : public std::runtime_error {
  public:
   ColumnarConversionNotSupported()
-      : std::runtime_error("Columnar conversion not supported for variable length types") {}
+      : std::runtime_error(
+            "Columnar conversion not supported for variable length types") {}
 };
 
 class ColumnarResults {
  public:
   ColumnarResults(const std::shared_ptr<RowSetMemoryOwner> row_set_mem_owner,
-                  const ResultRows& rows,
+                  const ResultSet& rows,
                   const size_t num_columns,
                   const std::vector<SQLTypeInfo>& target_types);
 
@@ -89,4 +93,7 @@ class ColumnarResults {
   const std::vector<SQLTypeInfo> target_types_;
 };
 
+typedef std::
+    unordered_map<int, std::unordered_map<int, std::shared_ptr<const ColumnarResults>>>
+        ColumnCacheMap;
 #endif  // COLUMNAR_RESULTS_H

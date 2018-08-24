@@ -1,5 +1,4 @@
-/*
- * Copyright 2017 MapD Technologies, Inc.
+/* * Copyright 2017 MapD Technologies, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,24 +17,33 @@
 #define QUERYENGINE_EXPRESSIONRANGE_H
 
 #include "../Analyzer/Analyzer.h"
+#include "../Shared/unreachable.h"
 
-#include <boost/multiprecision/cpp_int.hpp>
-#include <deque>
+#include <boost/multiprecision/cpp_int.hpp>  //#include <boost/none.hpp>
+#include <boost/optional.hpp>
 
 typedef boost::multiprecision::number<
-    boost::multiprecision::
-        cpp_int_backend<64, 64, boost::multiprecision::signed_magnitude, boost::multiprecision::checked, void>>
+    boost::multiprecision::cpp_int_backend<64,
+                                           64,
+                                           boost::multiprecision::signed_magnitude,
+                                           boost::multiprecision::checked,
+                                           void>>
     checked_int64_t;
 
 enum class ExpressionRangeType { Invalid, Integer, Float, Double };
 
 class ExpressionRange;
 
+class InputColDescriptor;
+
 template <typename T>
 T getMin(const ExpressionRange& other);
 
 template <typename T>
 T getMax(const ExpressionRange& other);
+
+template <typename T>
+T get_value_from_datum(const Datum datum, const SQLTypes type_info) noexcept;
 
 class ExpressionRange {
  public:
@@ -46,11 +54,15 @@ class ExpressionRange {
     return ExpressionRange(int_min, int_max, bucket, has_nulls);
   }
 
-  static ExpressionRange makeDoubleRange(const double fp_min, const double fp_max, const bool has_nulls) {
+  static ExpressionRange makeDoubleRange(const double fp_min,
+                                         const double fp_max,
+                                         const bool has_nulls) {
     return ExpressionRange(ExpressionRangeType::Double, fp_min, fp_max, has_nulls);
   }
 
-  static ExpressionRange makeFloatRange(const float fp_min, const float fp_max, const bool has_nulls) {
+  static ExpressionRange makeFloatRange(const float fp_min,
+                                        const float fp_max,
+                                        const bool has_nulls) {
     return ExpressionRange(ExpressionRangeType::Float, fp_min, fp_max, has_nulls);
   }
 
@@ -76,6 +88,32 @@ class ExpressionRange {
     return fp_max_;
   }
 
+  void setIntMin(const int64_t int_min) {
+    CHECK(ExpressionRangeType::Integer == type_);
+    int_min_ = int_min;
+  }
+
+  void setIntMax(const int64_t int_max) {
+    CHECK(ExpressionRangeType::Integer == type_);
+    int_max_ = int_max;
+  }
+
+  void setIntInvalidRange() {
+    CHECK(ExpressionRangeType::Integer == type_);
+    int_max_ = -1;
+    int_min_ = 0;
+  }
+
+  void setFpMin(const double fp_min) {
+    CHECK(type_ == ExpressionRangeType::Float || type_ == ExpressionRangeType::Double);
+    fp_min_ = fp_min;
+  }
+
+  void setFpMax(const double fp_max) {
+    CHECK(type_ == ExpressionRangeType::Float || type_ == ExpressionRangeType::Double);
+    fp_max_ = fp_max;
+  }
+
   ExpressionRangeType getType() const { return type_; }
 
   int64_t getBucket() const {
@@ -99,22 +137,30 @@ class ExpressionRange {
   bool operator==(const ExpressionRange& other) const;
 
  private:
-  ExpressionRange(const int64_t int_min_in, const int64_t int_max_in, const int64_t bucket, const bool has_nulls_in)
-      : type_(ExpressionRangeType::Integer),
-        has_nulls_(has_nulls_in),
-        int_min_(int_min_in),
-        int_max_(int_max_in),
-        bucket_(bucket) {}
+  ExpressionRange(const int64_t int_min_in,
+                  const int64_t int_max_in,
+                  const int64_t bucket,
+                  const bool has_nulls_in)
+      : type_(ExpressionRangeType::Integer)
+      , has_nulls_(has_nulls_in)
+      , int_min_(int_min_in)
+      , int_max_(int_max_in)
+      , bucket_(bucket) {}
 
   ExpressionRange(const ExpressionRangeType type,
                   const double fp_min_in,
                   const double fp_max_in,
                   const bool has_nulls_in)
-      : type_(type), has_nulls_(has_nulls_in), fp_min_(fp_min_in), fp_max_(fp_max_in), bucket_(0) {
+      : type_(type)
+      , has_nulls_(has_nulls_in)
+      , fp_min_(fp_min_in)
+      , fp_max_(fp_max_in)
+      , bucket_(0) {
     CHECK(type_ == ExpressionRangeType::Float || type_ == ExpressionRangeType::Double);
   }
 
-  ExpressionRange() : type_(ExpressionRangeType::Invalid), has_nulls_(false), bucket_(0) {}
+  ExpressionRange()
+      : type_(ExpressionRangeType::Invalid), has_nulls_(false), bucket_(0) {}
 
   template <class T, class BinOp>
   ExpressionRange binOp(const ExpressionRange& other, const BinOp& bin_op) const {
@@ -191,6 +237,62 @@ inline double getMax<double>(const ExpressionRange& e) {
   return e.getFpMax();
 }
 
+template <>
+inline int64_t get_value_from_datum(const Datum datum,
+                                    const SQLTypes type_info) noexcept {
+  switch (type_info) {
+    case kBOOLEAN:
+      return datum.boolval;
+    case kTINYINT:
+      return datum.tinyintval;
+    case kSMALLINT:
+      return datum.smallintval;
+    case kINT:
+      return datum.intval;
+    case kBIGINT:
+      return datum.bigintval;
+    case kTIME:
+    case kTIMESTAMP:
+    case kDATE:
+      return static_cast<int64_t>(datum.timeval);
+    case kNUMERIC:
+    case kDECIMAL: {
+      return datum.bigintval;
+      break;
+    }
+    default:
+      UNREACHABLE();
+  }
+  return (int64_t)0;
+}
+
+template <>
+inline double get_value_from_datum(const Datum datum, const SQLTypes type_info) noexcept {
+  switch (type_info) {
+    case kFLOAT:
+      return datum.floatval;
+    case kDOUBLE:
+      return datum.doubleval;
+    default:
+      UNREACHABLE();
+  }
+  return 0.0;
+}
+
+void apply_int_qual(const Datum const_datum,
+                    const SQLTypes const_type,
+                    const SQLOps sql_op,
+                    ExpressionRange& qual_range);
+void apply_fp_qual(const Datum const_datum,
+                   const SQLTypes const_type,
+                   const SQLOps sql_op,
+                   ExpressionRange& qual_range);
+
+ExpressionRange apply_simple_quals(
+    const Analyzer::ColumnVar*,
+    const ExpressionRange&,
+    const boost::optional<std::list<std::shared_ptr<Analyzer::Expr>>> = boost::none);
+
 class Executor;
 struct InputTableInfo;
 
@@ -199,6 +301,10 @@ ExpressionRange getLeafColumnRange(const Analyzer::ColumnVar*,
                                    const Executor*,
                                    const bool is_outer_join_proj);
 
-ExpressionRange getExpressionRange(const Analyzer::Expr*, const std::vector<InputTableInfo>&, const Executor*);
+ExpressionRange getExpressionRange(
+    const Analyzer::Expr*,
+    const std::vector<InputTableInfo>&,
+    const Executor*,
+    boost::optional<std::list<std::shared_ptr<Analyzer::Expr>>> = boost::none);
 
 #endif  // QUERYENGINE_EXPRESSIONRANGE_H

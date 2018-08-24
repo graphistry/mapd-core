@@ -15,10 +15,15 @@
  */
 package com.mapd.calcite.parser;
 
-import com.mapd.parser.server.ExtensionFunction;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+
 import org.apache.calcite.avatica.util.Casing;
 import org.apache.calcite.plan.RelOptUtil;
+import org.apache.calcite.prepare.MapDPlanner;
+import org.apache.calcite.prepare.SqlIdentifierCapturer;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelRoot;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
@@ -29,8 +34,8 @@ import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlLiteral;
-import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlNumericLiteral;
 import org.apache.calcite.sql.SqlOperatorTable;
 import org.apache.calcite.sql.SqlOrderBy;
@@ -39,7 +44,6 @@ import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.parser.SqlParseException;
 import org.apache.calcite.sql.parser.SqlParser;
 import org.apache.calcite.sql.parser.SqlParserPos;
-import org.apache.calcite.prepare.MapDPlanner;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.sql.type.SqlTypeUtil;
 import org.apache.calcite.tools.FrameworkConfig;
@@ -51,12 +55,16 @@ import org.apache.calcite.util.ConversionUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.mapd.parser.server.ExtensionFunction;
+
 /**
  *
  * @author michael
  */
 public final class MapDParser {
 
+  public static final ThreadLocal<MapDParser> CURRENT_PARSER = new ThreadLocal<>();
+  
   final static Logger MAPDLOGGER = LoggerFactory.getLogger(MapDParser.class);
 
 //    private SqlTypeFactoryImpl typeFactory;
@@ -111,6 +119,44 @@ public final class MapDParser {
     String res = MapDSerializer.toString(project);
 
     return res;
+  }
+
+  public MapDPlanner.CompletionResult getCompletionHints(String sql, int cursor, List<String> visible_tables) {
+    return ((MapDPlanner) getPlanner()).getCompletionHints(sql, cursor, visible_tables);
+  }
+  
+  public Set<String> resolveSelectIdentifiers(SqlIdentifierCapturer capturer) {
+    MapDSchema schema = new MapDSchema(dataDir, this, mapdPort, mapdUser);
+    HashSet<String> resolved = new HashSet<>();
+
+    for (String name : capturer.selects) {
+      MapDTable table = (MapDTable) schema.getTable(name);
+      if (null == table) {
+        throw new RuntimeException("table/view not found: " + name);
+      }
+      
+      if (table instanceof MapDView) {
+        MapDView view = (MapDView) table;
+        resolved.addAll(resolveSelectIdentifiers(view.getAccessedObjects()));
+      } else {
+        resolved.add(name);
+      }
+    }
+    
+    return resolved;
+  }
+  
+  public SqlIdentifierCapturer captureIdentifiers(String sql, boolean legacy_syntax) throws SqlParseException {
+    try {
+      Planner planner = getPlanner();
+      SqlNode node = processSQL(sql, legacy_syntax, planner);
+      SqlIdentifierCapturer capturer = new SqlIdentifierCapturer();
+      capturer.scan(node);
+      return capturer;
+    } catch (Exception|Error e) {
+      MAPDLOGGER.error("Error parsing sql: "+sql, e);
+      return new SqlIdentifierCapturer();
+    }
   }
 
   RelRoot queryToSqlNode(final String sql, final boolean legacy_syntax) throws SqlParseException, ValidationException, RelConversionException {
@@ -210,6 +256,7 @@ public final class MapDParser {
       MAPDLOGGER.error("failed to process SQL '" + sql + "' \n" + ex.toString());
       throw ex;
     }
+    
     if (!legacy_syntax) {
       return parseR;
     }

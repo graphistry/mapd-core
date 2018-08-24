@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,38 +21,44 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Jeffail/gabs"
 	log "github.com/Sirupsen/logrus"
 	"github.com/andrewseidl/viper"
 	"github.com/gorilla/handlers"
-	"github.com/rcrowley/go-metrics"
+	"github.com/gorilla/sessions"
+	metrics "github.com/rcrowley/go-metrics"
 	"github.com/rs/cors"
 	"github.com/spf13/pflag"
-	"gopkg.in/tylerb/graceful.v1"
+	graceful "gopkg.in/tylerb/graceful.v1"
 )
 
 var (
-	port          int
-	backendUrl    *url.URL
-	frontend      string
-	serversJson   string
-	dataDir       string
-	tmpDir        string
-	certFile      string
-	keyFile       string
-	docsDir       string
-	readOnly      bool
-	verbose       bool
-	enableHttps   bool
-	profile       bool
-	compress      bool
-	enableMetrics bool
-	connTimeout   time.Duration
-	version       string
-	proxies       []ReverseProxy
+	port                int
+	httpsRedirectPort   int
+	backendUrl          *url.URL
+	frontend            string
+	serversJson         string
+	dataDir             string
+	tmpDir              string
+	certFile            string
+	keyFile             string
+	docsDir             string
+	readOnly            bool
+	verbose             bool
+	enableHttps         bool
+	enableHttpsRedirect bool
+	profile             bool
+	compress            bool
+	enableMetrics       bool
+	connTimeout         time.Duration
+	version             string
+	proxies             []ReverseProxy
 )
 
 var (
-	registry metrics.Registry
+	registry          metrics.Registry
+	sessionStore      *sessions.CookieStore
+	serversJSONParams []string
 )
 
 type Server struct {
@@ -93,6 +100,7 @@ func getLogName(lvl string) string {
 func init() {
 	var err error
 	pflag.IntP("port", "p", 9092, "frontend server port")
+	pflag.IntP("http-to-https-redirect-port", "", 9094, "frontend server port for http redirect, when https enabled")
 	pflag.StringP("backend-url", "b", "", "url to http-port on mapd_server [http://localhost:9090]")
 	pflag.StringSliceP("reverse-proxy", "", nil, "additional endpoints to act as reverse proxies, format '/endpoint/:http://target.example.com'")
 	pflag.StringP("frontend", "f", "frontend", "path to frontend directory")
@@ -105,6 +113,7 @@ func init() {
 	pflag.BoolP("quiet", "q", true, "suppress non-error messages")
 	pflag.BoolP("verbose", "v", false, "print all log messages to stdout")
 	pflag.BoolP("enable-https", "", false, "enable HTTPS support")
+	pflag.BoolP("enable-https-redirect", "", false, "enable HTTP to HTTPS redirect")
 	pflag.StringP("cert", "", "cert.pem", "certificate file for HTTPS")
 	pflag.StringP("key", "", "key.pem", "key file for HTTPS")
 	pflag.DurationP("timeout", "", 60*time.Minute, "maximum request duration")
@@ -121,11 +130,13 @@ func init() {
 	pflag.Parse()
 
 	viper.BindPFlag("web.port", pflag.CommandLine.Lookup("port"))
+	viper.BindPFlag("web.http-to-https-redirect-port", pflag.CommandLine.Lookup("http-to-https-redirect-port"))
 	viper.BindPFlag("web.backend-url", pflag.CommandLine.Lookup("backend-url"))
 	viper.BindPFlag("web.reverse-proxy", pflag.CommandLine.Lookup("reverse-proxy"))
 	viper.BindPFlag("web.frontend", pflag.CommandLine.Lookup("frontend"))
 	viper.BindPFlag("web.servers-json", pflag.CommandLine.Lookup("servers-json"))
 	viper.BindPFlag("web.enable-https", pflag.CommandLine.Lookup("enable-https"))
+	viper.BindPFlag("web.enable-https-redirect", pflag.CommandLine.Lookup("enable-https-redirect"))
 	viper.BindPFlag("web.cert", pflag.CommandLine.Lookup("cert"))
 	viper.BindPFlag("web.key", pflag.CommandLine.Lookup("key"))
 	viper.BindPFlag("web.timeout", pflag.CommandLine.Lookup("timeout"))
@@ -163,11 +174,12 @@ func init() {
 		viper.SetConfigFile(viper.GetString("config"))
 		err := viper.ReadInConfig()
 		if err != nil {
-			log.Fatal(err)
+			log.Warn("Error reading config file: " + err.Error())
 		}
 	}
 
 	port = viper.GetInt("web.port")
+	httpsRedirectPort = viper.GetInt("web.http-to-https-redirect-port")
 	frontend = viper.GetString("web.frontend")
 	docsDir = viper.GetString("web.docs")
 	serversJson = viper.GetString("web.servers-json")
@@ -232,6 +244,7 @@ func init() {
 	}
 
 	enableHttps = viper.GetBool("web.enable-https")
+	enableHttpsRedirect = viper.GetBool("web.enable-https-redirect")
 	certFile = viper.GetString("web.cert")
 	keyFile = viper.GetString("web.key")
 
@@ -251,6 +264,17 @@ func init() {
 		Units:  "ms",
 		Labels: []string{"execution_time_ms", "total_time_ms"},
 	}
+
+	c := 64
+	b := make([]byte, c)
+	_, err = rand.Read(b)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	sessionStore = sessions.NewCookieStore(b)
+	sessionStore.MaxAge(0)
+	serversJSONParams = []string{"username", "password", "database"}
 }
 
 func uploadHandler(rw http.ResponseWriter, r *http.Request) {
@@ -278,17 +302,12 @@ func uploadHandler(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	uploadDir := dataDir + "/mapd_import/"
-	switch r.FormValue("uploadtype") {
-	case "image":
-		uploadDir = dataDir + "/mapd_images/"
-	default:
-		sid := r.Header.Get("sessionid")
-		if len(r.FormValue("sessionid")) > 0 {
-			sid = r.FormValue("sessionid")
-		}
-		sessionId := filepath.Base(filepath.Clean(sid))
-		uploadDir = dataDir + "/mapd_import/" + sessionId + "/"
+	sid := r.Header.Get("sessionid")
+	if len(r.FormValue("sessionid")) > 0 {
+		sid = r.FormValue("sessionid")
 	}
+	sessionId := filepath.Base(filepath.Clean(sid))
+	uploadDir = dataDir + "/mapd_import/" + sessionId + "/"
 
 	for _, fhs := range r.MultipartForm.File {
 		for _, fh := range fhs {
@@ -357,11 +376,34 @@ func (w *ResponseMultiWriter) Write(b []byte) (int, error) {
 	return w.Writer.Write(b)
 }
 
+func hasCustomServersJSONParams(r *http.Request) bool {
+	// Checking for form values requires calling ParseForm, which modifies the
+	// request buffer and causes issues with the proxy. Solution is to duplicate
+	// the request body and reset it after reading.
+	b, _ := ioutil.ReadAll(r.Body)
+	rdr1 := ioutil.NopCloser(bytes.NewReader(b))
+	rdr2 := ioutil.NopCloser(bytes.NewReader(b))
+	r.Body = rdr1
+	defer func() { r.Body = rdr2 }()
+	for _, k := range serversJSONParams {
+		if len(r.FormValue(k)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // thriftTimingHandler records timings for all Thrift method calls. It also
 // records timings reported by the backend, as defined by ThriftMethodMap.
 // TODO(andrew): use proper Thrift-generated parser
 func thriftTimingHandler(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" && hasCustomServersJSONParams(r) {
+			setServersJSONHandler(rw, r)
+			http.Redirect(rw, r, r.URL.Path, http.StatusSeeOther)
+			return
+		}
+
 		if !enableMetrics || r.Method != "POST" || (r.Method == "POST" && r.URL.Path != "/") {
 			h.ServeHTTP(rw, r)
 			return
@@ -431,6 +473,26 @@ func metricsResetHandler(rw http.ResponseWriter, r *http.Request) {
 	metricsHandler(rw, r)
 }
 
+func setServersJSONHandler(rw http.ResponseWriter, r *http.Request) {
+	session, _ := sessionStore.Get(r, "servers-json")
+
+	for _, key := range serversJSONParams {
+		if len(r.FormValue(key)) > 0 {
+			session.Values[key] = r.FormValue(key)
+		}
+	}
+
+	session.Save(r, rw)
+}
+
+func clearServersJSONHandler(rw http.ResponseWriter, r *http.Request) {
+	session, _ := sessionStore.Get(r, "servers-json")
+
+	session.Options.MaxAge = -1
+
+	session.Save(r, rw)
+}
+
 func docsHandler(rw http.ResponseWriter, r *http.Request) {
 	h := http.StripPrefix("/docs/", http.FileServer(http.Dir(docsDir)))
 	h.ServeHTTP(rw, r)
@@ -452,17 +514,17 @@ func thriftOrFrontendHandler(rw http.ResponseWriter, r *http.Request) {
 	h.ServeHTTP(rw, r)
 }
 
-func (rp *ReverseProxy) proxyHandler(rw http.ResponseWriter, r *http.Request) {
-	h := http.StripPrefix(rp.Path, httputil.NewSingleHostReverseProxy(rp.Target))
-	h.ServeHTTP(rw, r)
+func httpToHTTPSRedirectHandler(rw http.ResponseWriter, r *http.Request) {
+	// Redirect HTTP request to same URL with only two changes: https scheme,
+	// and the main server port configured in the 'port' param, rather than the
+	// incoming port ('http-to-https-redirect-port')
+	requestHost, _, _ := net.SplitHostPort(r.Host)
+	redirectURL := url.URL{Scheme: "https", Host: requestHost + ":" + strconv.Itoa(port), Path: r.URL.Path, RawQuery: r.URL.RawQuery}
+	http.Redirect(rw, r, redirectURL.String(), http.StatusTemporaryRedirect)
 }
 
-func imagesHandler(rw http.ResponseWriter, r *http.Request) {
-	if r.RequestURI == "/images/" {
-		rw.Write([]byte(""))
-		return
-	}
-	h := http.StripPrefix("/images/", http.FileServer(http.Dir(dataDir+"/mapd_images/")))
+func (rp *ReverseProxy) proxyHandler(rw http.ResponseWriter, r *http.Request) {
+	h := http.StripPrefix(rp.Path, httputil.NewSingleHostReverseProxy(rp.Target))
 	h.ServeHTTP(rw, r)
 }
 
@@ -473,6 +535,30 @@ func downloadsHandler(rw http.ResponseWriter, r *http.Request) {
 	}
 	h := http.StripPrefix("/downloads/", http.FileServer(http.Dir(dataDir+"/mapd_export/")))
 	h.ServeHTTP(rw, r)
+}
+
+func modifyServersJSON(r *http.Request, orig []byte) ([]byte, error) {
+	session, _ := sessionStore.Get(r, "servers-json")
+	j, err := gabs.ParseJSON(orig)
+	if err != nil {
+		return nil, err
+	}
+
+	jj, err := j.Children()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, key := range serversJSONParams {
+		if session.Values[key] != nil {
+			_, err = jj[0].Set(session.Values[key].(string), key)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return j.BytesIndent("", "  "), nil
 }
 
 func serversHandler(rw http.ResponseWriter, r *http.Request) {
@@ -507,9 +593,18 @@ func serversHandler(rw http.ResponseWriter, r *http.Request) {
 		ss := []Server{s}
 		j, _ = json.Marshal(ss)
 	}
+
+	jj, err := modifyServersJSON(r, j)
+	if err != nil {
+		msg := "Error processing servers.json: " + err.Error()
+		http.Error(rw, msg, http.StatusInternalServerError)
+		log.Println(msg)
+		return
+	}
+
 	rw.Header().Del("Cache-Control")
 	rw.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
-	rw.Write(j)
+	rw.Write(jj)
 }
 
 func versionHandler(rw http.ResponseWriter, r *http.Request) {
@@ -551,7 +646,6 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/upload", uploadHandler)
-	mux.HandleFunc("/images/", imagesHandler)
 	mux.HandleFunc("/downloads/", downloadsHandler)
 	mux.HandleFunc("/deleteUpload", deleteUploadHandler)
 	mux.HandleFunc("/servers.json", serversHandler)
@@ -560,11 +654,8 @@ func main() {
 	mux.HandleFunc("/metrics/", metricsHandler)
 	mux.HandleFunc("/metrics/reset/", metricsResetHandler)
 	mux.HandleFunc("/version.txt", versionHandler)
-
-	// Required while Immerse V1 or V2 is deployed to a subdir of the frontend.
-	// To be removed once Immerse V1 is no longer distributed.
-	mux.HandleFunc("/v1/servers.json", serversHandler)
-	mux.HandleFunc("/v2/servers.json", serversHandler)
+	mux.HandleFunc("/_internal/set-servers-json", setServersJSONHandler)
+	mux.HandleFunc("/_internal/clear-servers-json", clearServersJSONHandler)
 
 	if profile {
 		mux.HandleFunc("/debug/pprof/", pprof.Index)
@@ -606,6 +697,17 @@ func main() {
 		if _, err := os.Stat(keyFile); err != nil {
 			log.Fatalln("Error opening keyfile:", err)
 		}
+
+		if enableHttpsRedirect {
+			go func() {
+				err := http.ListenAndServe(":"+strconv.Itoa(httpsRedirectPort), http.HandlerFunc(httpToHTTPSRedirectHandler))
+
+				if err != nil {
+					log.Fatalln("Error starting http redirect listener:", err)
+				}
+			}()
+		}
+
 		err = srv.ListenAndServeTLS(certFile, keyFile)
 	} else {
 		err = srv.ListenAndServe()

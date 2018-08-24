@@ -76,10 +76,16 @@ public class MetaConnect {
   private static final int KTEXT = 13;
   private static final int KDATE = 14;
   private static final int KARRAY = 15;
+  private static final int KINTERVAL_DAY_TIME = 16;
+  private static final int KINTERVAL_YEAR_MONTH = 17;
+  private static final int KPOINT = 18;
+  private static final int KLINESTRING = 19;
+  private static final int KPOLYGON = 20;
+  private static final int KMULTIPOLYGON = 21;
+  private static final int KTINYINT = 22;
 
-  private static volatile Map<String, Set<String>> MAPD_DATABASE_TO_TABLES
-          = new ConcurrentHashMap();
-  private static volatile Map<List<String>, Table> MAPD_TABLE_DETAILS = new ConcurrentHashMap();
+  private static volatile Map<String, Set<String>> MAPD_DATABASE_TO_TABLES = new ConcurrentHashMap<>();
+  private static volatile Map<List<String>, Table> MAPD_TABLE_DETAILS = new ConcurrentHashMap<>();
 
   public MetaConnect(int mapdPort, String dataDir, MapDUser currentMapDUser, MapDParser parser) {
     this.dataDir = dataDir;
@@ -98,8 +104,8 @@ public class MetaConnect {
       // try {
       Class.forName("org.sqlite.JDBC");
     } catch (ClassNotFoundException ex) {
-      String err = "Could not find class for metadata connection; DB: '" + db + "' data dir '"
-              + dataDir + "', error was " + ex.getMessage();
+      String err = "Could not find class for metadata connection; DB: '" + db + "' data dir '" + dataDir
+          + "', error was " + ex.getMessage();
       MAPDLOGGER.error(err);
       throw new RuntimeException(err);
     }
@@ -107,8 +113,8 @@ public class MetaConnect {
     try {
       catConn = DriverManager.getConnection(connectURL);
     } catch (SQLException ex) {
-      String err = "Could not establish a connection for metadata; DB: '" + db
-              + "' data dir '" + dataDir + "', error was " + ex.getMessage();
+      String err = "Could not establish a connection for metadata; DB: '" + db + "' data dir '" + dataDir
+          + "', error was " + ex.getMessage();
       MAPDLOGGER.error(err);
       throw new RuntimeException(err);
     }
@@ -119,8 +125,8 @@ public class MetaConnect {
     try {
       catConn.close();
     } catch (SQLException ex) {
-      String err = "Could not disconnect for metadata; DB: '" + db + "' data dir '" + dataDir
-              + "', error was " + ex.getMessage();
+      String err = "Could not disconnect for metadata; DB: '" + db + "' data dir '" + dataDir + "', error was "
+          + ex.getMessage();
       MAPDLOGGER.error(err);
       throw new RuntimeException(err);
     }
@@ -240,8 +246,7 @@ public class MetaConnect {
 
       MapD.Client client = new MapD.Client(protocol);
 
-      TTableDetails td
-              = client.get_internal_table_details(currentUser.getSession(), tableName);
+      TTableDetails td = client.get_internal_table_details(currentUser.getSession(), tableName);
 
       transport.close();
 
@@ -257,6 +262,26 @@ public class MetaConnect {
       MAPDLOGGER.error(ex.toString());
       throw new RuntimeException(ex.toString());
     }
+  }
+
+  public static final int get_physical_cols(int type){
+    switch (type) {
+      case KPOINT:
+        return 1;  // coords
+      case KLINESTRING:
+        return 2;  // coords, bounds
+      case KPOLYGON:
+        return 4;  // coords, ring_sizes, bounds, render_group
+      case KMULTIPOLYGON:
+        return 5;  // coords, ring_sizes, poly_rings, bounds, render_group
+      default:
+        break;
+    }
+    return 0;
+  }
+
+  public static final boolean is_geometry(int type){
+    return type == KPOINT || type == KLINESTRING || type == KPOLYGON || type == KMULTIPOLYGON;
   }
 
   private TTableDetails get_table_detail_SQL(String tableName) {
@@ -276,10 +301,11 @@ public class MetaConnect {
       stmt = catConn.createStatement();
       MAPDLOGGER.debug("table id is " + id);
       MAPDLOGGER.debug("table name is " + tableName);
-      String query = String.format(
-              "SELECT * FROM mapd_columns where tableid = %d order by columnid;", id);
+      String query = String
+          .format("SELECT * FROM mapd_columns where tableid = %d and not is_deletedcol order by columnid;", id);
       MAPDLOGGER.debug(query);
       rs = stmt.executeQuery(query);
+      int skip_physical_cols = 0;
       while (rs.next()) {
         String colName = rs.getString("name");
         MAPDLOGGER.debug("name = " + colName);
@@ -318,7 +344,11 @@ public class MetaConnect {
 
         tct.col_name = colName;
         tct.col_type = tti;
-        td.addToRow_desc(tct);
+
+        if (skip_physical_cols <= 0)
+          skip_physical_cols = get_physical_cols(colType);
+        if (is_geometry(colType) || skip_physical_cols-- <= 0)
+          td.addToRow_desc(tct);
       }
     } catch (Exception e) {
       String err = "error trying to read from mapd_columns, error was " + e.getMessage();
@@ -357,9 +387,8 @@ public class MetaConnect {
     int tableId = -1;
     try {
       stmt = catConn.createStatement();
-      rs = stmt.executeQuery(String.format(
-              "SELECT tableid FROM mapd_tables where name = '%s' COLLATE NOCASE;",
-              tableName));
+      rs = stmt
+          .executeQuery(String.format("SELECT tableid FROM mapd_tables where name = '%s' COLLATE NOCASE;", tableName));
       while (rs.next()) {
         tableId = rs.getInt("tableid");
         MAPDLOGGER.debug("tableId = " + tableId);
@@ -368,8 +397,8 @@ public class MetaConnect {
       rs.close();
       stmt.close();
     } catch (Exception e) {
-      String err = "Error trying to read from metadata table mapd_tables;DB: " + db
-              + " data dir " + dataDir + ", error was " + e.getMessage();
+      String err = "Error trying to read from metadata table mapd_tables;DB: " + db + " data dir " + dataDir
+          + ", error was " + e.getMessage();
       MAPDLOGGER.error(err);
       throw new RuntimeException(err);
     } finally {
@@ -401,8 +430,8 @@ public class MetaConnect {
     int viewFlag = 0;
     try {
       stmt = catConn.createStatement();
-      rs = stmt.executeQuery(String.format(
-              "SELECT isview FROM mapd_tables where name = '%s' COLLATE NOCASE;", tableName));
+      rs = stmt
+          .executeQuery(String.format("SELECT isview FROM mapd_tables where name = '%s' COLLATE NOCASE;", tableName));
       while (rs.next()) {
         viewFlag = rs.getInt("isview");
         MAPDLOGGER.debug("viewFlag = " + viewFlag);
@@ -468,8 +497,7 @@ public class MetaConnect {
     String sqlText = "";
     try {
       stmt = catConn.createStatement();
-      rs = stmt.executeQuery(String.format(
-              "SELECT sql FROM mapd_views where tableid = '%s' COLLATE NOCASE;", tableId));
+      rs = stmt.executeQuery(String.format("SELECT sql FROM mapd_views where tableid = '%s' COLLATE NOCASE;", tableId));
       while (rs.next()) {
         sqlText = rs.getString("sql");
         MAPDLOGGER.debug("View definition = " + sqlText);
@@ -492,38 +520,53 @@ public class MetaConnect {
 
   private TDatumType typeToThrift(int type) {
     switch (type) {
-      case KBOOLEAN:
-        return TDatumType.BOOL;
-      case KSMALLINT:
-        return TDatumType.SMALLINT;
-      case KINT:
-        return TDatumType.INT;
-      case KBIGINT:
-        return TDatumType.BIGINT;
-      case KFLOAT:
-        return TDatumType.FLOAT;
-      case KNUMERIC:
-      case KDECIMAL:
-        return TDatumType.DECIMAL;
-      case KDOUBLE:
-        return TDatumType.DOUBLE;
-      case KTEXT:
-      case KVARCHAR:
-      case KCHAR:
-        return TDatumType.STR;
-      case KTIME:
-        return TDatumType.TIME;
-      case KTIMESTAMP:
-        return TDatumType.TIMESTAMP;
-      case KDATE:
-        return TDatumType.DATE;
-      default:
-        return null;
+    case KBOOLEAN:
+      return TDatumType.BOOL;
+    case KTINYINT:
+      return TDatumType.TINYINT;
+    case KSMALLINT:
+      return TDatumType.SMALLINT;
+    case KINT:
+      return TDatumType.INT;
+    case KBIGINT:
+      return TDatumType.BIGINT;
+    case KFLOAT:
+      return TDatumType.FLOAT;
+    case KNUMERIC:
+    case KDECIMAL:
+      return TDatumType.DECIMAL;
+    case KDOUBLE:
+      return TDatumType.DOUBLE;
+    case KTEXT:
+    case KVARCHAR:
+    case KCHAR:
+      return TDatumType.STR;
+    case KTIME:
+      return TDatumType.TIME;
+    case KTIMESTAMP:
+      return TDatumType.TIMESTAMP;
+    case KDATE:
+      return TDatumType.DATE;
+    case KINTERVAL_DAY_TIME:
+      return TDatumType.INTERVAL_DAY_TIME;
+    case KINTERVAL_YEAR_MONTH:
+      return TDatumType.INTERVAL_YEAR_MONTH;
+    case KPOINT:
+      return TDatumType.POINT;
+    case KLINESTRING:
+      return TDatumType.LINESTRING;
+    case KPOLYGON:
+      return TDatumType.POLYGON;
+    case KMULTIPOLYGON:
+      return TDatumType.MULTIPOLYGON;
+    default:
+      return null;
     }
   }
 
   public void updateMetaData(String schema, String table) {
-    // Check if table is specified, if not we are dropping an entire DB so need to remove all
+    // Check if table is specified, if not we are dropping an entire DB so need to
+    // remove all
     // tables for that DB
     if (table.equals("")) {
       // Drop db and all tables
@@ -531,13 +574,11 @@ public class MetaConnect {
       for (List<String> keys : MAPD_TABLE_DETAILS.keySet()) {
         if (keys.get(1).equals(schema.toUpperCase())) {
           MAPDLOGGER.debug("removing schema " + keys.get(1) + " table " + keys.get(2));
-          MAPD_TABLE_DETAILS.remove(
-                  ImmutableList.of(keys.get(1).toUpperCase(), keys.get(2).toUpperCase()));
+          MAPD_TABLE_DETAILS.remove(ImmutableList.of(keys.get(1).toUpperCase(), keys.get(2).toUpperCase()));
         }
       }
     } else {
-      MAPDLOGGER.debug(
-              "removing schema " + schema.toUpperCase() + " table " + table.toUpperCase());
+      MAPDLOGGER.debug("removing schema " + schema.toUpperCase() + " table " + table.toUpperCase());
       MAPD_TABLE_DETAILS.remove(ImmutableList.of(schema.toUpperCase(), table.toUpperCase()));
     }
     // now remove schema

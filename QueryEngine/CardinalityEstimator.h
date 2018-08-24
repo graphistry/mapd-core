@@ -49,7 +49,9 @@ class NDVEstimator : public Analyzer::Expr {
   NDVEstimator(const std::list<std::shared_ptr<Analyzer::Expr>>& expr_tuple)
       : Expr(SQLTypeInfo(kINT, true)), expr_tuple_(expr_tuple) {}
 
-  const std::list<std::shared_ptr<Analyzer::Expr>>& getArgument() const { return expr_tuple_; }
+  const std::list<std::shared_ptr<Analyzer::Expr>>& getArgument() const {
+    return expr_tuple_;
+  }
 
   std::shared_ptr<Analyzer::Expr> deep_copy() const override {
     CHECK(false);
@@ -69,15 +71,17 @@ class NDVEstimator : public Analyzer::Expr {
   const std::list<std::shared_ptr<Analyzer::Expr>> expr_tuple_;
 };
 
-}  // Analyzer
+}  // namespace Analyzer
 
-inline RelAlgExecutionUnit create_ndv_execution_unit(const RelAlgExecutionUnit& ra_exe_unit) {
+inline RelAlgExecutionUnit create_ndv_execution_unit(
+    const RelAlgExecutionUnit& ra_exe_unit) {
   return {ra_exe_unit.input_descs,
           ra_exe_unit.extra_input_descs,
           ra_exe_unit.input_col_descs,
           ra_exe_unit.simple_quals,
           ra_exe_unit.quals,
           ra_exe_unit.join_type,
+          ra_exe_unit.inner_joins,
           ra_exe_unit.join_dimensions,
           ra_exe_unit.inner_join_quals,
           ra_exe_unit.outer_join_quals,
@@ -89,14 +93,16 @@ inline RelAlgExecutionUnit create_ndv_execution_unit(const RelAlgExecutionUnit& 
           0};
 }
 
-inline RelAlgExecutionUnit create_count_all_execution_unit(const RelAlgExecutionUnit& ra_exe_unit,
-                                                           std::shared_ptr<Analyzer::Expr> replacement_target) {
+inline RelAlgExecutionUnit create_count_all_execution_unit(
+    const RelAlgExecutionUnit& ra_exe_unit,
+    std::shared_ptr<Analyzer::Expr> replacement_target) {
   return {ra_exe_unit.input_descs,
           ra_exe_unit.extra_input_descs,
           ra_exe_unit.input_col_descs,
           ra_exe_unit.simple_quals,
           ra_exe_unit.quals,
           ra_exe_unit.join_type,
+          ra_exe_unit.inner_joins,
           ra_exe_unit.join_dimensions,
           ra_exe_unit.inner_join_quals,
           ra_exe_unit.outer_join_quals,

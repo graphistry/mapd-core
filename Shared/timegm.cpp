@@ -31,26 +31,40 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <time.h>
+#include "TimeGM.h"
+#include <cmath>
+#include <ctime>
 
 /* Number of days per month (except for February in leap years). */
-static const int monoff[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
+// static const int monoff[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
 
-static int is_leap_year(int year) {
+int TimeGM::is_leap_year(int year) {
   return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
 }
 
-static int leap_days(int y1, int y2) {
+int TimeGM::leap_days(int y1, int y2) {
   --y1;
   --y2;
   return (y2 / 4 - y1 / 4) - (y2 / 100 - y1 / 100) + (y2 / 400 - y1 / 400);
 }
 
+time_t TimeGM::parse_fractional_seconds(std::string sfrac, SQLTypeInfo& ti) {
+  int nfrac = sfrac.length();
+
+  if (nfrac >= 0 && nfrac < ti.get_dimension()) {
+    char d = '0';
+    sfrac += std::string(ti.get_dimension() - nfrac, d);
+  } else if (nfrac > ti.get_dimension()) {
+    sfrac = sfrac.substr(0, ti.get_dimension());
+  }
+  return std::stol(sfrac);
+}
+
 /*
  * Code adapted from Python 2.4.1 sources (Lib/calendar.py).
  */
-time_t my_timegm(const struct tm* tm) {
-  int year;
+time_t TimeGM::my_timegm(const struct tm* tm) {
+  int32_t year;
   time_t days;
   time_t hours;
   time_t minutes;
@@ -60,8 +74,9 @@ time_t my_timegm(const struct tm* tm) {
   days = 365 * (year - 1970) + leap_days(1970, year);
   days += monoff[tm->tm_mon];
 
-  if (tm->tm_mon > 1 && is_leap_year(year))
+  if (tm->tm_mon > 1 && is_leap_year(year)) {
     ++days;
+  }
   days += tm->tm_mday - 1;
 
   hours = days * 24 + tm->tm_hour;
@@ -71,4 +86,13 @@ time_t my_timegm(const struct tm* tm) {
   seconds -= tm->tm_gmtoff;
 
   return seconds;
+}
+
+time_t TimeGM::my_timegm(const struct tm* tm, const time_t& fsc, SQLTypeInfo& ti) {
+  time_t sec;
+
+  sec = my_timegm(tm) * static_cast<int64_t>(pow(10, ti.get_dimension()));
+  sec += fsc;
+
+  return sec;
 }

@@ -33,13 +33,14 @@ import org.slf4j.LoggerFactory;
 public class MapDStatement implements java.sql.Statement {
 
   final static org.slf4j.Logger logger = LoggerFactory.getLogger(MapDStatement.class);
+  public SQLWarning rootWarning = null;
+
   private String session;
   private MapD.Client client;
   private ResultSet currentRS = null;
   private TQueryResult sqlResult = null;
   private int maxRows = 100000; // add limit to unlimited queries
   private boolean escapeProcessing = false;
-  private int queryTimeout;
 
   MapDStatement(String tsession, MapD.Client tclient) {
     session = tsession;
@@ -64,7 +65,7 @@ public class MapDStatement implements java.sql.Statement {
     String afterFnSQL = fnReplace(sql);
     logger.debug("afterFnSQL is :'" + afterFnSQL + "'");
     try {
-      sqlResult = client.sql_execute(session, afterFnSQL + ";", true, null, -1);
+      sqlResult = client.sql_execute(session, afterFnSQL + ";", true, null, -1, -1);
     } catch (TMapDException ex) {
       throw new SQLException("Query failed : " + ex.getError_msg());
     } catch (TException ex) {
@@ -78,7 +79,11 @@ public class MapDStatement implements java.sql.Statement {
   @Override
   public int executeUpdate(String sql) throws SQLException { //logger.debug("Entered");
     try {
-      sqlResult = client.sql_execute(session, sql + ";", true, null, -1);
+      // remove " characters if it is a CREATE statement
+      if (sql.trim().substring(0, 6).compareToIgnoreCase("CREATE") == 0) {
+        sql = sql.replace('"', ' ');
+      }
+      sqlResult = client.sql_execute(session, sql + ";", true, null, -1, -1);
     } catch (TMapDException ex) {
       throw new SQLException("Query failed : " + ex.getError_msg() + " sql was '" + sql + "'");
     } catch (TException ex) {
@@ -125,13 +130,22 @@ public class MapDStatement implements java.sql.Statement {
 
   @Override
   public int getQueryTimeout() throws SQLException { //logger.debug("Entered");
-    //TODO MAT have overloaded this option to allow for internal time comparisson
+    return 0;
+  }
+
+  //used by benchmarking to get internal execution times
+  public int getQueryInternalExecuteTime() throws SQLException { //logger.debug("Entered");
     return (int) sqlResult.execution_time_ms;
   }
 
   @Override
   public void setQueryTimeout(int seconds) throws SQLException { //logger.debug("Entered");
-    queryTimeout = seconds;
+    SQLWarning warning = new SQLWarning("Query timeouts are not supported.  Substituting a value of zero.");
+    if (rootWarning == null) {
+      rootWarning = warning;
+    } else {
+      rootWarning.setNextWarning(warning);
+    }
   }
 
   @Override
@@ -143,16 +157,12 @@ public class MapDStatement implements java.sql.Statement {
 
   @Override
   public SQLWarning getWarnings() throws SQLException { //logger.debug("Entered");
-    throw new UnsupportedOperationException("Not supported yet," + " line:" + new Throwable().getStackTrace()[0].
-            getLineNumber() + " class:" + new Throwable().getStackTrace()[0].getClassName() + " method:" + new Throwable().
-            getStackTrace()[0].getMethodName());
+    return (rootWarning);
   }
 
   @Override
   public void clearWarnings() throws SQLException { //logger.debug("Entered");
-    throw new UnsupportedOperationException("Not supported yet," + " line:" + new Throwable().getStackTrace()[0].
-            getLineNumber() + " class:" + new Throwable().getStackTrace()[0].getClassName() + " method:" + new Throwable().
-            getStackTrace()[0].getMethodName());
+    rootWarning = null;
   }
 
   @Override
@@ -205,9 +215,12 @@ public class MapDStatement implements java.sql.Statement {
 
   @Override
   public void setFetchSize(int rows) throws SQLException { //logger.debug("Entered");
-    throw new UnsupportedOperationException("Not supported yet," + " line:" + new Throwable().getStackTrace()[0].
-            getLineNumber() + " class:" + new Throwable().getStackTrace()[0].getClassName() + " method:" + new Throwable().
-            getStackTrace()[0].getMethodName());
+    SQLWarning warning = new SQLWarning("Query FetchSize are not supported.  Substituting a value of zero.");
+    if (rootWarning == null) {
+      rootWarning = warning;
+    } else {
+      rootWarning.setNextWarning(warning);
+    }
   }
 
   @Override

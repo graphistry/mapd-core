@@ -20,17 +20,20 @@
 #include "GroupByAndAggregate.h"
 #include "RelAlgAbstractInterpreter.h"
 
-class ResultRows;
+class ResultSet;
 
 class ExecutionResult {
  public:
-  ExecutionResult(const ResultRows& rows, const std::vector<TargetMetaInfo>& targets_meta)
-      : result_(boost::make_unique<ResultRows>(rows)), targets_meta_(targets_meta) {}
+  ExecutionResult(const std::shared_ptr<ResultSet>& rows,
+                  const std::vector<TargetMetaInfo>& targets_meta)
+      : result_(rows), targets_meta_(targets_meta) {}
 
-  ExecutionResult(const IteratorTable& table, const std::vector<TargetMetaInfo>& targets_meta)
+  ExecutionResult(const IteratorTable& table,
+                  const std::vector<TargetMetaInfo>& targets_meta)
       : result_(boost::make_unique<IteratorTable>(table)), targets_meta_(targets_meta) {}
 
-  ExecutionResult(ResultPtr&& result, const std::vector<TargetMetaInfo>& targets_meta) : targets_meta_(targets_meta) {
+  ExecutionResult(ResultPtr&& result, const std::vector<TargetMetaInfo>& targets_meta)
+      : targets_meta_(targets_meta) {
     if (auto rows = boost::get<RowSetPtr>(&result)) {
       result_ = std::move(*rows);
       CHECK(boost::get<RowSetPtr>(result_));
@@ -45,7 +48,7 @@ class ExecutionResult {
   ExecutionResult(const ExecutionResult& that) : targets_meta_(that.targets_meta_) {
     if (const auto rows = boost::get<RowSetPtr>(&that.result_)) {
       CHECK(*rows);
-      result_ = boost::make_unique<ResultRows>(**rows);
+      result_ = *rows;
       CHECK(boost::get<RowSetPtr>(result_));
     } else if (const auto tab = boost::get<IterTabPtr>(&that.result_)) {
       CHECK(*tab);
@@ -71,7 +74,7 @@ class ExecutionResult {
   ExecutionResult& operator=(const ExecutionResult& that) {
     if (const auto rows = boost::get<RowSetPtr>(&that.result_)) {
       CHECK(*rows);
-      result_ = boost::make_unique<ResultRows>(**rows);
+      result_ = *rows;
       CHECK(boost::get<RowSetPtr>(result_));
     } else if (const auto tab = boost::get<IterTabPtr>(&that.result_)) {
       CHECK(*tab);
@@ -84,10 +87,10 @@ class ExecutionResult {
     return *this;
   }
 
-  const ResultRows& getRows() const {
+  const std::shared_ptr<ResultSet>& getRows() const {
     auto& rows = boost::get<RowSetPtr>(result_);
     CHECK(rows);
-    return *rows;
+    return rows;
   }
 
   bool empty() const {
@@ -120,7 +123,13 @@ class ExecutionResult {
 class RaExecutionDesc {
  public:
   RaExecutionDesc(const RelAlgNode* body)
-      : body_(body), result_({{}, {}, nullptr, nullptr, {}, ExecutorDeviceType::CPU}, {}) {}
+      : body_(body)
+      , result_(std::make_shared<ResultSet>(std::vector<TargetInfo>{},
+                                            ExecutorDeviceType::CPU,
+                                            QueryMemoryDescriptor(),
+                                            nullptr,
+                                            nullptr),
+                {}) {}
 
   const ExecutionResult& getResult() const { return result_; }
 
@@ -137,6 +146,7 @@ class RaExecutionDesc {
 };
 
 std::vector<RaExecutionDesc> get_execution_descriptors(const RelAlgNode*);
-std::vector<RaExecutionDesc> get_execution_descriptors(const std::vector<const RelAlgNode*>&);
+std::vector<RaExecutionDesc> get_execution_descriptors(
+    const std::vector<const RelAlgNode*>&);
 
 #endif  // QUERYENGINE_RELALGEXECUTIONDESCRIPTOR_H

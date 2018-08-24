@@ -42,15 +42,15 @@ class RelAlgTranslator {
   RelAlgTranslator(const Catalog_Namespace::Catalog& cat,
                    const Executor* executor,
                    const std::unordered_map<const RelAlgNode*, int>& input_to_nest_level,
-                   const JoinType join_type,
+                   const std::vector<JoinType>& join_types,
                    const time_t now,
                    const bool just_explain)
-      : cat_(cat),
-        executor_(executor),
-        input_to_nest_level_(input_to_nest_level),
-        join_type_(join_type),
-        now_(now),
-        just_explain_(just_explain) {}
+      : cat_(cat)
+      , executor_(executor)
+      , input_to_nest_level_(input_to_nest_level)
+      , join_types_(join_types)
+      , now_(now)
+      , just_explain_(just_explain) {}
 
   std::shared_ptr<Analyzer::Expr> translateScalarRex(const RexScalar* rex) const;
 
@@ -70,7 +70,7 @@ class RelAlgTranslator {
   std::shared_ptr<Analyzer::Expr> translateInOper(const RexOperator*) const;
 
   std::shared_ptr<Analyzer::Expr> getInIntegerSetExpr(std::shared_ptr<Analyzer::Expr> arg,
-                                                      const ResultRows& val_rows) const;
+                                                      const ResultSet& val_set) const;
 
   std::shared_ptr<Analyzer::Expr> translateOper(const RexOperator*) const;
 
@@ -106,16 +106,55 @@ class RelAlgTranslator {
 
   std::shared_ptr<Analyzer::Expr> translateSign(const RexFunctionOperator*) const;
 
+  std::shared_ptr<Analyzer::Expr> translateOffsetInFragment() const;
+
   std::shared_ptr<Analyzer::Expr> translateFunction(const RexFunctionOperator*) const;
 
-  std::vector<std::shared_ptr<Analyzer::Expr>> translateFunctionArgs(const RexFunctionOperator*) const;
+  std::vector<std::shared_ptr<Analyzer::Expr>> translateFunctionArgs(
+      const RexFunctionOperator*) const;
+
+  std::shared_ptr<Analyzer::Expr> translateUnaryGeoFunction(
+      const RexFunctionOperator*) const;
+
+  std::shared_ptr<Analyzer::Expr> translateBinaryGeoFunction(
+      const RexFunctionOperator*) const;
+
+  std::vector<std::shared_ptr<Analyzer::Expr>> translateGeoFunctionArg(
+      const RexScalar* rex_scalar,
+      SQLTypeInfo& arg_ti,
+      int32_t& lindex,
+      const bool with_bounds,
+      const bool with_render_group,
+      const bool expand_geo_col) const;
+
+  std::vector<std::shared_ptr<Analyzer::Expr>> translateGeoColumn(
+      const RexInput*,
+      SQLTypeInfo&,
+      const bool with_bounds,
+      const bool with_render_group,
+      const bool expand_geo_col) const;
+
+  std::vector<std::shared_ptr<Analyzer::Expr>> translateGeoLiteral(const RexLiteral*,
+                                                                   SQLTypeInfo&,
+                                                                   bool) const;
 
   const Catalog_Namespace::Catalog& cat_;
   const Executor* executor_;
   const std::unordered_map<const RelAlgNode*, int> input_to_nest_level_;
-  const JoinType join_type_;
+  const std::vector<JoinType> join_types_;
   time_t now_;
   const bool just_explain_;
 };
+
+struct QualsConjunctiveForm {
+  const std::list<std::shared_ptr<Analyzer::Expr>> simple_quals;
+  const std::list<std::shared_ptr<Analyzer::Expr>> quals;
+};
+
+QualsConjunctiveForm qual_to_conjunctive_form(
+    const std::shared_ptr<Analyzer::Expr> qual_expr);
+
+std::vector<std::shared_ptr<Analyzer::Expr>> qual_to_disjunctive_form(
+    const std::shared_ptr<Analyzer::Expr>& qual_expr);
 
 #endif  // QUERYENGINE_RELALGTRANSLATOR_H

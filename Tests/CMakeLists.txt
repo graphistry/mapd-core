@@ -4,8 +4,8 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 set(TEST_BASE_PATH "./tmp")
 add_definitions("-DBASE_PATH=\"${TEST_BASE_PATH}\"")
 
-add_executable(ExecuteTest ExecuteTest.cpp QueryRunner.cpp)
-add_executable(RunQueryLoop RunQueryLoop.cpp QueryRunner.cpp)
+add_executable(ExecuteTest ExecuteTest.cpp)
+add_executable(RunQueryLoop RunQueryLoop.cpp)
 add_executable(StringDictionaryTest StringDictionaryTest.cpp)
 add_executable(PlanTest PlanTest.cpp)
 add_executable(ProfileTest ProfileTest.cpp)
@@ -39,23 +39,42 @@ add_executable(UtilTest UtilTest.cpp)
 add_executable(StorageTest StorageTest.cpp PopulateTableRandom.cpp ScanTable.cpp)
 add_executable(StoragePerfTest StoragePerfTest.cpp PopulateTableRandom.cpp ScanTable.cpp)
 add_executable(ImportTest ImportTest.cpp)
+add_executable(AlterColumnTest AlterColumnTest.cpp)
+add_executable(UpdelStorageTest UpdelStorageTest.cpp)
+add_executable(TopKTest TopKTest.cpp)
+add_executable(TokenCompletionHintsTest TokenCompletionHintsTest.cpp)
+add_executable(MapDQLCommandTest MapDQLCommandTest.cpp)
+add_executable(DBObjectPrivilegesTest DBObjectPrivilegesTest.cpp)
+add_executable(GeoTypesTest Shared/GeoTypesTest.cpp)
 
-target_link_libraries(PlanTest gtest ${MAPD_LIBRARIES} ${Boost_LIBRARIES} ${Glog_LIBRARIES} ${CMAKE_DL_LIBS} ${CUDA_LIBRARIES} ${LLVM_LINKER_FLAGS} ${CURSES_LIBRARIES})
-target_link_libraries(ProfileTest gtest ${MAPD_LIBRARIES} ${Boost_LIBRARIES} ${Glog_LIBRARIES} ${CMAKE_DL_LIBS} ${CUDA_LIBRARIES} ${PROF_LIBRARIES} ${LLVM_LINKER_FLAGS} ${CURSES_LIBRARIES})
+target_link_libraries(ProfileTest gtest Shared Calcite QueryEngine ${MAPD_RENDERING_LIBRARIES} CsvImport QueryRunner Parser ${Boost_LIBRARIES} ${Glog_LIBRARIES} ${CMAKE_DL_LIBS} ${CUDA_LIBRARIES} ${PROF_LIBRARIES} ${LLVM_LINKER_FLAGS} ${CURSES_LIBRARIES})
+target_link_libraries(ResultSetTest gtest gtest QueryEngine ${MAPD_RENDERING_LIBRARIES} ${Boost_LIBRARIES} CsvImport QueryRunner Parser DataMgr Chunk ${Boost_LIBRARIES} ${Glog_LIBRARIES} ${CMAKE_DL_LIBS} ${CUDA_LIBRARIES} ${LLVM_LINKER_FLAGS} ${CURSES_LIBRARIES})
+target_link_libraries(ResultSetBaselineRadixSortTest gtest QueryEngine ${MAPD_RENDERING_LIBRARIES} CsvImport QueryRunner Parser DataMgr Chunk ${Boost_LIBRARIES} ${Glog_LIBRARIES} ${CMAKE_DL_LIBS} ${CUDA_LIBRARIES} ${LLVM_LINKER_FLAGS} ${CURSES_LIBRARIES})
 target_link_libraries(UtilTest Utils gtest ${Boost_LIBRARIES})
-target_link_libraries(StorageTest gtest ${MAPD_LIBRARIES} ${Boost_LIBRARIES} ${Glog_LIBRARIES} ${CMAKE_DL_LIBS} ${CUDA_LIBRARIES} ${LLVM_LINKER_FLAGS} ${CURSES_LIBRARIES})
-target_link_libraries(StoragePerfTest gtest ${MAPD_LIBRARIES} ${Boost_LIBRARIES} ${Glog_LIBRARIES} ${CMAKE_DL_LIBS} ${CUDA_LIBRARIES} ${LLVM_LINKER_FLAGS} ${CURSES_LIBRARIES})
-set(EXECUTE_TEST_LIBS gtest ${MAPD_LIBRARIES} ${Boost_LIBRARIES} ${Glog_LIBRARIES} ${CMAKE_DL_LIBS} ${CUDA_LIBRARIES} ${LLVM_LINKER_FLAGS} ${CURSES_LIBRARIES})
-list(APPEND EXECUTE_TEST_LIBS Calcite)
-target_link_libraries(ExecuteTest ${EXECUTE_TEST_LIBS})
-target_link_libraries(ResultSetTest ${EXECUTE_TEST_LIBS})
-target_link_libraries(ResultSetBaselineRadixSortTest ${EXECUTE_TEST_LIBS})
-target_link_libraries(RunQueryLoop ${EXECUTE_TEST_LIBS})
 target_link_libraries(StringDictionaryTest StringDictionary gtest ${Boost_LIBRARIES})
-target_link_libraries(ImportTest gtest ${MAPD_LIBRARIES})
+target_link_libraries(TokenCompletionHintsTest token_completion_hints gtest mapd_thrift ${Boost_LIBRARIES})
+set(EXECUTE_TEST_LIBS gtest QueryRunner ${MAPD_LIBRARIES} ${Boost_LIBRARIES} ${Glog_LIBRARIES} ${CMAKE_DL_LIBS} ${CUDA_LIBRARIES} ${LLVM_LINKER_FLAGS} ${CURSES_LIBRARIES})
+list(APPEND EXECUTE_TEST_LIBS Calcite)
+list(APPEND EXECUTE_TEST_LIBS Calcite mapd_thrift)
+
+target_link_libraries(ExecuteTest ${EXECUTE_TEST_LIBS})
+target_link_libraries(RunQueryLoop ${EXECUTE_TEST_LIBS} bcrypt)
+target_link_libraries(ImportTest gtest ${EXECUTE_TEST_LIBS})
+target_link_libraries(AlterColumnTest gtest ${EXECUTE_TEST_LIBS})
+target_link_libraries(PlanTest gtest ${EXECUTE_TEST_LIBS})
+target_link_libraries(UpdelStorageTest gtest ${EXECUTE_TEST_LIBS})
+target_link_libraries(StorageTest gtest ${EXECUTE_TEST_LIBS})
+target_link_libraries(StoragePerfTest gtest ${EXECUTE_TEST_LIBS})
+target_link_libraries(TopKTest ${EXECUTE_TEST_LIBS})
+target_link_libraries(MapDQLCommandTest gtest ${EXECUTE_TEST_LIBS} ${Boost_LIBRARIES})
+target_link_libraries(DBObjectPrivilegesTest gtest ${EXECUTE_TEST_LIBS} ${Boost_LIBRARIES})
+target_link_libraries(GeoTypesTest gtest ${EXECUTE_TEST_LIBS})
 
 set(TEST_ARGS "--gtest_output=xml:../")
 add_test(PlanTest PlanTest ${TEST_ARGS})
+add_test(UpdelStorageTest UpdelStorageTest ${TEST_ARGS})
+add_test(ImportTest ImportTest ${TEST_ARGS})
+add_test(AlterColumnTest AlterColumnTest ${TEST_ARGS})
 add_test(UtilTest UtilTest ${TEST_ARGS})
 add_test(ExecuteTest ExecuteTest ${TEST_ARGS})
 add_test(ResultSetTest ResultSetTest ${TEST_ARGS})
@@ -64,22 +83,61 @@ add_test(RunQueryLoop RunQueryLoop ${TEST_ARGS})
 add_test(StringDictionaryTest StringDictionaryTest ${TEST_ARGS})
 add_test(StorageTest StorageTest ${TEST_ARGS})
 add_test(StoragePerfTest StoragePerfTest ${TEST_ARGS})
-add_test(ImportTest ImportTest ${TEST_ARGS})
+add_test(TopKTest TopKTest ${TEST_ARGS})
+add_test(TokenCompletionHintsTest TokenCompletionHintsTest ${TEST_ARGS})
+add_test(MapDQLCommandTest MapDQLCommandTest ${TEST_ARGS})
+add_test(DBObjectPrivilegesTest DBObjectPrivilegesTest ${TEST_ARGS})
+add_test(GeoTypesTest GeoTypesTest ${TEST_ARGS})
+
+# parse s3 credentials
+file(READ aws/s3client.conf S3CLIENT_CONF)
+if("${S3CLIENT_CONF}" MATCHES "AWS_ACCESS_KEY_ID=([^\n]+)")
+  set(AWS_ACCESS_KEY_ID "${CMAKE_MATCH_1}")
+endif()
+if("${S3CLIENT_CONF}" MATCHES "AWS_SECRET_ACCESS_KEY=([^\n]+)")
+  set(AWS_SECRET_ACCESS_KEY "${CMAKE_MATCH_1}")
+endif()
+if("${S3CLIENT_CONF}" MATCHES "AWS_REGION=([^\n]+)")
+  set(AWS_REGION "${CMAKE_MATCH_1}")
+endif()
+
+set(SANITY_TESTS
+  PlanTest
+  ExecuteTest
+  ResultSetTest
+  ResultSetBaselineRadixSortTest
+  StorageTest
+  ImportTest
+  AlterColumnTest
+  UpdelStorageTest
+  TopKTest
+  TokenCompletionHintsTest
+  MapDQLCommandTest
+  DBObjectPrivilegesTest
+  GeoTypesTest
+)
+set_tests_properties(${SANITY_TESTS} PROPERTIES LABELS "sanity")
 
 add_custom_target(sanity_tests
     COMMAND mkdir -p ${TEST_BASE_PATH}
     COMMAND initdb -f ${TEST_BASE_PATH}
-    COMMAND ${CMAKE_CTEST_COMMAND} --verbose --tests-regex "\"(PlanTest|ExecuteTest|ResultSetTest|ResultSetBaselineRadixSortTest|StorageTest|ImportTest)\""
-    DEPENDS PlanTest ExecuteTest ResultSetTest ResultSetBaselineRadixSortTest StorageTest ImportTest)
+    COMMAND env AWS_REGION=${AWS_REGION} AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} ${CMAKE_CTEST_COMMAND} --verbose --label-regex sanity
+    DEPENDS ${SANITY_TESTS})
 
 add_custom_target(all_tests
     COMMAND mkdir -p ${TEST_BASE_PATH}
     COMMAND initdb -f ${TEST_BASE_PATH}
-    COMMAND ${CMAKE_CTEST_COMMAND} --verbose
-    DEPENDS PlanTest ProfileTest UtilTest ExecuteTest ResultSetTest ResultSetBaselineRadixSortTest RunQueryLoop StringDictionaryTest StorageTest StoragePerfTest ImportTest)
+    COMMAND env AWS_REGION=${AWS_REGION} AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} ${CMAKE_CTEST_COMMAND} --verbose
+    DEPENDS ${SANITY_TESTS} ProfileTest UtilTest RunQueryLoop StringDictionaryTest StoragePerfTest)
 
 add_custom_target(storage_perf_tests
     COMMAND mkdir -p ${TEST_BASE_PATH}
     COMMAND initdb -f ${TEST_BASE_PATH}
     COMMAND ${CMAKE_CTEST_COMMAND} --verbose --tests-regex "\"(StoragePerfTest)\""
     DEPENDS StoragePerfTest)
+
+add_custom_target(topk_tests
+    COMMAND mkdir -p ${TEST_BASE_PATH}
+    COMMAND initdb -f ${TEST_BASE_PATH}
+    COMMAND ${CMAKE_CTEST_COMMAND} --verbose --tests-regex "\"(TopKTest)\""
+    DEPENDS TopKTest)

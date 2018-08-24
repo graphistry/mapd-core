@@ -24,32 +24,37 @@
 #ifndef ARRAY_NONE_ENCODER_H
 #define ARRAY_NONE_ENCODER_H
 
+#include <cassert>
 #include <cstring>
 #include <memory>
-#include <vector>
+#include <mutex>
 #include <string>
-#include <cassert>
+#include <vector>
 #include "AbstractBuffer.h"
 #include "ChunkMetadata.h"
 #include "Encoder.h"
-#include <mutex>
 
 using Data_Namespace::AbstractBuffer;
 
 class ArrayNoneEncoder : public Encoder {
  public:
   ArrayNoneEncoder(AbstractBuffer* buffer)
-      : Encoder(buffer), has_nulls(false), initialized(false), index_buf(nullptr), last_offset(-1) {}
+      : Encoder(buffer)
+      , has_nulls(false)
+      , initialized(false)
+      , index_buf(nullptr)
+      , last_offset(-1) {}
 
   size_t getNumElemsForBytesInsertData(const std::vector<ArrayDatum>* srcData,
                                        const int start_idx,
                                        const size_t numAppendElems,
-                                       const size_t byteLimit) {
+                                       const size_t byteLimit,
+                                       const bool replicating = false) {
     size_t dataSize = 0;
 
     size_t n = start_idx;
     for (; n < start_idx + numAppendElems; n++) {
-      size_t len = (*srcData)[n].length;
+      size_t len = (*srcData)[replicating ? 0 : n].length;
       if (dataSize + len > byteLimit)
         break;
       dataSize += len;
@@ -57,14 +62,19 @@ class ArrayNoneEncoder : public Encoder {
     return n - start_idx;
   }
 
-  ChunkMetadata appendData(int8_t*& srcData, const size_t numAppendElems) {
+  ChunkMetadata appendData(int8_t*& srcData,
+                           const size_t numAppendElems,
+                           const bool replicating = false) {
     assert(false);  // should never be called for arrays
     ChunkMetadata chunkMetadata;
     getMetadata(chunkMetadata);
     return chunkMetadata;
   }
 
-  ChunkMetadata appendData(const std::vector<ArrayDatum>* srcData, const int start_idx, const size_t numAppendElems) {
+  ChunkMetadata appendData(const std::vector<ArrayDatum>* srcData,
+                           const int start_idx,
+                           const size_t numAppendElems,
+                           const bool replicating) {
     assert(index_buf != nullptr);  // index_buf must be set before this.
     size_t index_size = numAppendElems * sizeof(StringOffsetT);
     if (numElems == 0)
@@ -72,7 +82,8 @@ class ArrayNoneEncoder : public Encoder {
     index_buf->reserve(index_size);
     StringOffsetT offset = 0;
     if (numElems == 0) {
-      index_buf->append((int8_t*)&offset, sizeof(StringOffsetT));  // write the inital 0 offset
+      index_buf->append((int8_t*)&offset,
+                        sizeof(StringOffsetT));  // write the inital 0 offset
       last_offset = 0;
     } else {
       if (last_offset < 0) {
@@ -86,19 +97,22 @@ class ArrayNoneEncoder : public Encoder {
     }
     size_t data_size = 0;
     for (size_t n = start_idx; n < start_idx + numAppendElems; n++) {
-      size_t len = (*srcData)[n].length;
+      size_t len = (*srcData)[replicating ? 0 : n].length;
       data_size += len;
     }
     buffer_->reserve(data_size);
 
-    size_t inbuf_size = std::min(std::max(index_size, data_size), (size_t)MAX_INPUT_BUF_SIZE);
+    size_t inbuf_size =
+        std::min(std::max(index_size, data_size), (size_t)MAX_INPUT_BUF_SIZE);
     auto inbuf = new int8_t[inbuf_size];
     std::unique_ptr<int8_t[]> gc_inbuf(inbuf);
     for (size_t num_appended = 0; num_appended < numAppendElems;) {
       StringOffsetT* p = (StringOffsetT*)inbuf;
       size_t i;
-      for (i = 0; num_appended < numAppendElems && i < inbuf_size / sizeof(StringOffsetT); i++, num_appended++) {
-        p[i] = last_offset + (*srcData)[num_appended + start_idx].length;
+      for (i = 0; num_appended < numAppendElems && i < inbuf_size / sizeof(StringOffsetT);
+           i++, num_appended++) {
+        p[i] =
+            last_offset + (*srcData)[replicating ? 0 : num_appended + start_idx].length;
         last_offset = p[i];
       }
       index_buf->append(inbuf, i * sizeof(StringOffsetT));
@@ -106,21 +120,23 @@ class ArrayNoneEncoder : public Encoder {
 
     for (size_t num_appended = 0; num_appended < numAppendElems;) {
       size_t size = 0;
-      for (int i = start_idx + num_appended; num_appended < numAppendElems && size < inbuf_size; i++, num_appended++) {
-        size_t len = (*srcData)[i].length;
+      for (int i = start_idx + num_appended;
+           num_appended < numAppendElems && size < inbuf_size;
+           i++, num_appended++) {
+        size_t len = (*srcData)[replicating ? 0 : i].length;
         if (len > inbuf_size) {
           // for large strings, append on its own
           if (size > 0)
             buffer_->append(inbuf, size);
           size = 0;
-          buffer_->append((*srcData)[i].data_ptr.get(), len);
+          buffer_->append((*srcData)[replicating ? 0 : i].pointer, len);
           num_appended++;
           break;
         } else if (size + len > inbuf_size)
           break;
         char* dest = (char*)inbuf + size;
         if (len > 0)
-          std::memcpy((void*)dest, (void*)(*srcData)[i].pointer, len);
+          std::memcpy((void*)dest, (void*)(*srcData)[replicating ? 0 : i].pointer, len);
         size += len;
       }
       if (size > 0)
@@ -133,7 +149,7 @@ class ArrayNoneEncoder : public Encoder {
 
     // keep Chunk statistics with array elements
     for (size_t n = start_idx; n < start_idx + numAppendElems; n++) {
-      update_elem_stats((*srcData)[n]);
+      update_elem_stats((*srcData)[replicating ? 0 : n]);
     }
     numElems += numAppendElems;
     ChunkMetadata chunkMetadata;
@@ -236,6 +252,21 @@ class ArrayNoneEncoder : public Encoder {
           } else {
             elem_min.smallintval = int_array[i];
             elem_max.smallintval = int_array[i];
+            initialized = true;
+          }
+        }
+      } break;
+      case kTINYINT: {
+        const int8_t* int_array = (int8_t*)array.pointer;
+        for (size_t i = 0; i < array.length / sizeof(int8_t); i++) {
+          if (int_array[i] == NULL_TINYINT)
+            has_nulls = true;
+          else if (initialized) {
+            elem_min.tinyintval = std::min(elem_min.tinyintval, int_array[i]);
+            elem_max.tinyintval = std::max(elem_max.tinyintval, int_array[i]);
+          } else {
+            elem_min.tinyintval = int_array[i];
+            elem_max.tinyintval = int_array[i];
             initialized = true;
           }
         }

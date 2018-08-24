@@ -25,20 +25,13 @@
 #ifndef QUERYENGINE_RESULTSET_H
 #define QUERYENGINE_RESULTSET_H
 
+#include "../Chunk/Chunk.h"
 #include "CardinalityEstimator.h"
 #include "ResultSetBufferAccessors.h"
 #include "TargetValue.h"
-#include "../Chunk/Chunk.h"
 
-#ifdef ENABLE_ARROW_CONVERTER
-#include "arrow/ipc/metadata.h"
-#include "arrow/table.h"
-// Arrow defines macro UNUSED conflict w/ that in jni_md.h
-#ifdef UNUSED
-#undef UNUSED
-#endif
-#include "arrow/type.h"
-#endif
+#include "arrow/api.h"
+#include "arrow/ipc/api.h"
 
 #include <atomic>
 #include <functional>
@@ -106,7 +99,9 @@ class ResultSetStorage {
                                         const size_t start_index,
                                         const size_t end_index) const;
 
-  void copyKeyColWise(const size_t entry_idx, int8_t* this_buff, const int8_t* that_buff) const;
+  void copyKeyColWise(const size_t entry_idx,
+                      int8_t* this_buff,
+                      const int8_t* that_buff) const;
 
   void reduceOneEntryNoCollisionsRowWise(const size_t i,
                                          int8_t* this_buff,
@@ -163,7 +158,8 @@ class ResultSetStorage {
 
   void initializeColWise() const;
 
-  // TODO(alex): remove the following two methods, see comment about count_distinct_sets_mapping_.
+  // TODO(alex): remove the following two methods, see comment about
+  // count_distinct_sets_mapping_.
   void addCountDistinctSetPointerMapping(const int64_t remote_ptr, const int64_t ptr);
 
   int64_t mappedPtr(const int64_t) const;
@@ -190,7 +186,7 @@ class Expr;
 class NDVEstimator;
 struct OrderEntry;
 
-}  // Analyzer
+}  // namespace Analyzer
 
 class Executor;
 
@@ -205,14 +201,18 @@ struct OneIntegerColumnRow {
   const bool valid;
 };
 
-#ifdef ENABLE_ARROW_CONVERTER
 struct ArrowResult {
   std::vector<char> sm_handle;
   int64_t sm_size;
   std::vector<char> df_handle;
   int64_t df_size;
+  int8_t* df_dev_ptr;  // Only for device memory deallocation
 };
-#endif
+
+void deallocate_arrow_result(const ArrowResult& result,
+                             const ExecutorDeviceType device_type,
+                             const size_t device_id,
+                             Data_Namespace::DataMgr* data_mgr);
 
 class TSerializedRows;
 
@@ -244,10 +244,13 @@ class ResultSet {
 
   ResultSet(const std::string& explanation);
 
-  // Empty result set constructor
-  ResultSet();
+  ResultSet(int64_t queue_time_ms,
+            int64_t render_time_ms,
+            const std::shared_ptr<RowSetMemoryOwner> row_set_mem_owner);
 
   ~ResultSet();
+
+  ExecutorDeviceType getDeviceType() const;
 
   const ResultSetStorage* allocateStorage() const;
 
@@ -255,9 +258,17 @@ class ResultSet {
 
   const ResultSetStorage* allocateStorage(const std::vector<int64_t>&) const;
 
-  std::vector<TargetValue> getNextRow(const bool translate_strings, const bool decimal_to_double) const;
+  std::vector<TargetValue> getNextRow(const bool translate_strings,
+                                      const bool decimal_to_double) const;
+
+  size_t getCurrentRowBufferIndex() const;
 
   std::vector<TargetValue> getRowAt(const size_t index) const;
+
+  TargetValue getRowAt(const size_t row_idx,
+                       const size_t col_idx,
+                       const bool translate_strings,
+                       const bool decimal_to_double = true) const;
 
   // Specialized random access getter for result sets with a single column to
   // avoid the overhead of building a std::vector<TargetValue> result with only
@@ -269,8 +280,6 @@ class ResultSet {
   bool isRowAtEmpty(const size_t index) const;
 
   void sort(const std::list<Analyzer::OrderEntry>& order_entries, const size_t top_n);
-
-  bool isEmptyInitializer() const;
 
   void keepFirstN(const size_t n);
 
@@ -284,11 +293,13 @@ class ResultSet {
 
   SQLTypeInfo getColType(const size_t col_idx) const;
 
-  size_t rowCount() const;
+  size_t rowCount(const bool force_parallel = false) const;
 
-  void setCachedRowCount(const size_t row_count);
+  void setCachedRowCount(const size_t row_count) const;
 
   size_t entryCount() const;
+
+  size_t getBufferSizeBytes(const ExecutorDeviceType device_type) const;
 
   bool definitelyHasNoRows() const;
 
@@ -308,6 +319,8 @@ class ResultSet {
 
   int64_t getQueueTime() const;
 
+  int64_t getRenderTime() const;
+
   void moveToBegin() const;
 
   bool isTruncated() const;
@@ -324,29 +337,51 @@ class ResultSet {
 
   void initializeStorage() const;
 
-  void holdChunks(const std::list<std::shared_ptr<Chunk_NS::Chunk>>& chunks) { chunks_ = chunks; }
+  void holdChunks(const std::list<std::shared_ptr<Chunk_NS::Chunk>>& chunks) {
+    chunks_ = chunks;
+  }
   void holdChunkIterators(const std::shared_ptr<std::list<ChunkIter>> chunk_iters) {
     chunk_iters_.push_back(chunk_iters);
   }
-  void holdLiterals(std::vector<int8_t>& literal_buff) { literal_buffers_.push_back(std::move(literal_buff)); }
+  void holdLiterals(std::vector<int8_t>& literal_buff) {
+    literal_buffers_.push_back(std::move(literal_buff));
+  }
 
-  std::shared_ptr<RowSetMemoryOwner> getRowSetMemOwner() const { return row_set_mem_owner_; }
+  std::shared_ptr<RowSetMemoryOwner> getRowSetMemOwner() const {
+    return row_set_mem_owner_;
+  }
+
+  const std::vector<uint32_t>& getPermutationBuffer() const;
 
   std::string serialize() const;
 
   static std::unique_ptr<ResultSet> unserialize(const std::string&, const Executor*);
 
-#ifdef ENABLE_ARROW_CONVERTER
+  struct SerializedArrowOutput {
+    std::shared_ptr<arrow::Buffer> schema;
+    std::shared_ptr<arrow::Buffer> records;
+  };
+
+  SerializedArrowOutput getSerializedArrowOutput(
+      const std::vector<std::string>& col_names) const;
+
   ArrowResult getArrowCopy(Data_Namespace::DataMgr* data_mgr,
                            const ExecutorDeviceType device_type,
                            const size_t device_id,
                            const std::vector<std::string>& col_names) const;
-#endif
+
+  size_t getLimit();
+
+  enum class GeoReturnType { GeoTargetValue, WktString };
+  GeoReturnType getGeoReturnType() const { return geo_return_type_; }
+  void setGeoReturnType(const GeoReturnType val) { geo_return_type_ = val; }
 
  private:
-  std::vector<TargetValue> getNextRowImpl(const bool translate_strings, const bool decimal_to_double) const;
+  std::vector<TargetValue> getNextRowImpl(const bool translate_strings,
+                                          const bool decimal_to_double) const;
 
-  std::vector<TargetValue> getNextRowUnlocked(const bool translate_strings, const bool decimal_to_double) const;
+  std::vector<TargetValue> getNextRowUnlocked(const bool translate_strings,
+                                              const bool decimal_to_double) const;
 
   std::vector<TargetValue> getRowAt(const size_t index,
                                     const bool translate_strings,
@@ -361,17 +396,20 @@ class ResultSet {
 
   void radixSortOnCpu(const std::list<Analyzer::OrderEntry>& order_entries) const;
 
-  static bool isNull(const SQLTypeInfo& ti, const InternalTargetValue& val, const bool float_argument_input);
+  static bool isNull(const SQLTypeInfo& ti,
+                     const InternalTargetValue& val,
+                     const bool float_argument_input);
 
-  TargetValue getTargetValueFromBufferRowwise(int8_t* rowwise_target_ptr,
-                                              int8_t* keys_ptr,
-                                              const size_t entry_buff_idx,
-                                              const TargetInfo& target_info,
-                                              const size_t target_logical_idx,
-                                              const size_t slot_idx,
-                                              const bool translate_strings,
-                                              const bool decimal_to_double,
-                                              const bool fixup_count_distinct_pointers) const;
+  TargetValue getTargetValueFromBufferRowwise(
+      int8_t* rowwise_target_ptr,
+      int8_t* keys_ptr,
+      const size_t entry_buff_idx,
+      const TargetInfo& target_info,
+      const size_t target_logical_idx,
+      const size_t slot_idx,
+      const bool translate_strings,
+      const bool decimal_to_double,
+      const bool fixup_count_distinct_pointers) const;
 
   TargetValue getTargetValueFromBufferColwise(const int8_t* col1_ptr,
                                               const int8_t compact_sz1,
@@ -399,18 +437,36 @@ class ResultSet {
                                     const size_t target_logical_idx,
                                     const size_t entry_buff_idx) const;
 
+  struct VarlenTargetPtrPair {
+    int8_t* ptr1;
+    int8_t compact_sz1;
+    int8_t* ptr2;
+    int8_t compact_sz2;
+
+    VarlenTargetPtrPair()
+        : ptr1(nullptr), compact_sz1(0), ptr2(nullptr), compact_sz2(0) {}
+  };
+  TargetValue makeGeoTargetValue(const VarlenTargetPtrPair& coords,
+                                 const VarlenTargetPtrPair& ring_sizes,
+                                 const VarlenTargetPtrPair& poly_rings,
+                                 const TargetInfo& target_info,
+                                 const size_t target_logical_idx,
+                                 const size_t entry_buff_idx) const;
+
   struct StorageLookupResult {
     const ResultSetStorage* storage_ptr;
     const size_t fixedup_entry_idx;
     const size_t storage_idx;
   };
 
-  InternalTargetValue getColumnInternal(const int8_t* buff,
-                                        const size_t entry_idx,
-                                        const size_t target_logical_idx,
-                                        const StorageLookupResult& storage_lookup_result) const;
+  InternalTargetValue getColumnInternal(
+      const int8_t* buff,
+      const size_t entry_idx,
+      const size_t target_logical_idx,
+      const StorageLookupResult& storage_lookup_result) const;
 
-  InternalTargetValue getVarlenOrderEntry(const int64_t str_ptr, const size_t str_len) const;
+  InternalTargetValue getVarlenOrderEntry(const int64_t str_ptr,
+                                          const size_t str_len) const;
 
   int64_t lazyReadInt(const int64_t ival,
                       const size_t target_logical_idx,
@@ -428,39 +484,43 @@ class ResultSet {
       const std::list<Analyzer::OrderEntry>& order_entries,
       const bool use_heap) const;
 
-  static void topPermutation(std::vector<uint32_t>& to_sort,
-                             const size_t n,
-                             const std::function<bool(const uint32_t, const uint32_t)> compare);
+  static void topPermutation(
+      std::vector<uint32_t>& to_sort,
+      const size_t n,
+      const std::function<bool(const uint32_t, const uint32_t)> compare);
 
   void sortPermutation(const std::function<bool(const uint32_t, const uint32_t)> compare);
 
   std::vector<uint32_t> initPermutationBuffer(const size_t start, const size_t step);
 
-  void parallelTop(const std::list<Analyzer::OrderEntry>& order_entries, const size_t top_n);
+  void parallelTop(const std::list<Analyzer::OrderEntry>& order_entries,
+                   const size_t top_n);
 
-  void baselineSort(const std::list<Analyzer::OrderEntry>& order_entries, const size_t top_n);
+  void baselineSort(const std::list<Analyzer::OrderEntry>& order_entries,
+                    const size_t top_n);
 
   void doBaselineSort(const ExecutorDeviceType device_type,
                       const std::list<Analyzer::OrderEntry>& order_entries,
                       const size_t top_n);
 
-  bool canUseFastBaselineSort(const std::list<Analyzer::OrderEntry>& order_entries, const size_t top_n);
+  bool canUseFastBaselineSort(const std::list<Analyzer::OrderEntry>& order_entries,
+                              const size_t top_n);
 
   Data_Namespace::DataMgr* getDataManager() const;
 
   int getGpuCount() const;
 
-#ifdef ENABLE_ARROW_CONVERTER
-  arrow::RecordBatch convertToArrow(const std::vector<std::string>& col_names, arrow::ipc::DictionaryMemo& memo) const;
+  std::shared_ptr<arrow::RecordBatch> convertToArrow(
+      const std::vector<std::string>& col_names,
+      arrow::ipc::DictionaryMemo& memo) const;
   std::shared_ptr<const std::vector<std::string>> getDictionary(const int dict_id) const;
-  std::pair<std::vector<std::shared_ptr<arrow::Array>>, size_t> getArrowColumns(
-      const std::vector<std::shared_ptr<arrow::Field>>& fields) const;
+  std::shared_ptr<arrow::RecordBatch> getArrowBatch(
+      const std::shared_ptr<arrow::Schema>& schema) const;
 
-  ArrowResult getArrowCopyOnCpu(Data_Namespace::DataMgr* data_mgr, const std::vector<std::string>& col_names) const;
+  ArrowResult getArrowCopyOnCpu(const std::vector<std::string>& col_names) const;
   ArrowResult getArrowCopyOnGpu(Data_Namespace::DataMgr* data_mgr,
                                 const size_t device_id,
                                 const std::vector<std::string>& col_names) const;
-#endif
 
   std::string serializeProjection() const;
 
@@ -469,6 +529,12 @@ class ResultSet {
   void unserializeCountDistinctColumns(const TSerializedRows&);
 
   void fixupCountDistinctPointers();
+
+  using BufferSet = std::set<int64_t>;
+  void create_active_buffer_set(BufferSet& count_distinct_active_buffer_set) const;
+
+  int64_t getDistinctBufferRefFromBufferRowwise(int8_t* rowwise_target_ptr,
+                                                const TargetInfo& target_info) const;
 
   const std::vector<TargetInfo> targets_;
   const ExecutorDeviceType device_type_;
@@ -507,8 +573,12 @@ class ResultSet {
   std::vector<std::vector<std::string>> none_encoded_strings_;
   bool none_encoded_strings_valid_;
   std::string explanation_;
-  std::atomic<ssize_t> cached_row_count_;
+  const bool just_explain_;
+  mutable std::atomic<ssize_t> cached_row_count_;
   mutable std::mutex row_iteration_mutex_;
+
+  // only used by geo
+  GeoReturnType geo_return_type_;
 
   friend class ResultSetManager;
 };
@@ -528,7 +598,9 @@ class RowSortException : public std::runtime_error {
   RowSortException(const std::string& cause) : std::runtime_error(cause) {}
 };
 
-int64_t lazy_decode(const ColumnLazyFetchInfo& col_lazy_fetch, const int8_t* byte_stream, const int64_t pos);
+int64_t lazy_decode(const ColumnLazyFetchInfo& col_lazy_fetch,
+                    const int8_t* byte_stream,
+                    const int64_t pos);
 
 void fill_empty_key(void* key_ptr, const size_t key_count, const size_t key_width);
 

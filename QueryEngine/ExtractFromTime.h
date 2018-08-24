@@ -19,7 +19,11 @@
 
 #include <stdint.h>
 #include <time.h>
+#include "../Shared/funcannotations.h"
 
+#define NANOSECSPERSEC 1000000000L
+#define MICROSECSPERSEC 1000000L
+#define MILLISECSPERSEC 1000L
 #define SECSPERMIN 60L
 #define MINSPERHOUR 60L
 #define HOURSPERDAY 24L
@@ -54,6 +58,12 @@
 /* number of days in non-leap February */
 #define DAYS_IN_FEBRUARY 28
 
+#define SECONDS_PER_NON_LEAP_YEAR 31536000
+#define SECONDS_PER_4_YEAR_CYCLE 126230400
+#define SECONDS_PER_DAY 86400
+#define EPOCH_OFFSET_YEAR_1900 2208988800
+#define SECONDS_FROM_JAN_1900_TO_MARCH_1900 5097600
+
 enum ExtractField {
   kYEAR,
   kQUARTER,
@@ -62,6 +72,9 @@ enum ExtractField {
   kHOUR,
   kMINUTE,
   kSECOND,
+  kMILLISECOND,
+  kMICROSECOND,
+  kNANOSECOND,
   kDOW,
   kISODOW,
   kDOY,
@@ -89,5 +102,12 @@ __device__
 #endif
     int64_t
     ExtractFromTime(ExtractField field, time_t timeval);
+
+extern "C" __attribute__((noinline))
+#ifdef __CUDACC__
+__device__
+#endif
+    int64_t
+    ExtractFromTimeHighPrecision(ExtractField field, time_t timeval, const int32_t dimen);
 
 #endif  // QUERYENGINE_EXTRACTFROMTIME_H

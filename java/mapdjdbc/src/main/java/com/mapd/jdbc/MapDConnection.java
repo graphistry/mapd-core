@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package com.mapd.jdbc;
 
 import com.mapd.thrift.server.MapD;
@@ -61,12 +60,14 @@ public class MapDConnection implements java.sql.Connection {
   protected String url = null;
   protected Properties properties = null;
   protected String user;
+  protected String catalog;
   protected TTransport transport;
   protected SQLWarning warnings;
 
   public MapDConnection(String url, Properties info) throws SQLException { //logger.debug("Entered");
     this.url = url;
     this.properties = info;
+    this.user = info.getProperty("user");
     boolean http_session = false;
 
     //logger.debug("We got to here " + url + " info: " + info.toString());
@@ -77,31 +78,36 @@ public class MapDConnection implements java.sql.Connection {
     //}
     String machine = temp[2];
 
+    // deal with requirement that there may be double // before the machine
+    if (machine.startsWith("//")) {
+      machine = machine.substring(2);
+    }
+
     //logger.debug("machine : " + machine);
     int port = Integer.valueOf(temp[3]);
-    String db = temp[4];
-    //test for http protocol request (we could consider usinig properties)
-    if (temp.length == 6){
-        if (temp[5].equals("http")){
-            http_session = true;
-        } else {
-            throw new SQLException("Connection failed invalid protocol option- " + temp[5]);
-        }
+    this.catalog = temp[4];
+    //test for http protocol request (we could consider using properties)
+    if (temp.length == 6) {
+      if (temp[5].equals("http")) {
+        http_session = true;
+      } else {
+        throw new SQLException("Connection failed invalid protocol option- " + temp[5]);
+      }
     }
     try {
       TProtocol protocol = null;
-      if (http_session){
+      if (http_session) {
         transport = new THttpClient("http://" + machine + ":" + port);
         transport.open();
         protocol = new TJSONProtocol(transport);
-      }  else {
+      } else {
         transport = new TSocket(machine, port);
         transport.open();
         protocol = new TBinaryProtocol(transport);
       }
       client = new MapD.Client(protocol);
 
-      session = client.connect(info.getProperty("user"), info.getProperty("password"), db);
+      session = client.connect(info.getProperty("user"), info.getProperty("password"), this.catalog);
 
       logger.debug("Connected session is " + session);
 
@@ -178,7 +184,7 @@ public class MapDConnection implements java.sql.Connection {
 
   @Override
   public boolean isClosed() throws SQLException { //logger.debug("Entered");
-    if (session == null){
+    if (session == null) {
       return true;
     }
     return false;
@@ -193,8 +199,8 @@ public class MapDConnection implements java.sql.Connection {
 
   @Override
   public void setReadOnly(boolean readOnly) throws SQLException { //logger.debug("Entered");
-	  // TODO MAT we can't push the readonly upstream currently 
-	  // but we could make JDBC obey this command
+    // TODO MAT we can't push the readonly upstream currently 
+    // but we could make JDBC obey this command
   }
 
   @Override
@@ -212,7 +218,7 @@ public class MapDConnection implements java.sql.Connection {
     // never should get here
     return true;
   }
-  
+
   @Override
   public void setCatalog(String catalog) throws SQLException { //logger.debug("Entered");
     throw new UnsupportedOperationException("Not supported yet," + " line:" + new Throwable().getStackTrace()[0].
@@ -222,7 +228,7 @@ public class MapDConnection implements java.sql.Connection {
 
   @Override
   public String getCatalog() throws SQLException { //logger.debug("Entered");
-    return user;
+    return catalog;
   }
 
   @Override
@@ -241,7 +247,7 @@ public class MapDConnection implements java.sql.Connection {
 
   @Override
   public void clearWarnings() throws SQLException { //logger.debug("Entered");
-      warnings = null;
+    warnings = null;
   }
 
   @Override

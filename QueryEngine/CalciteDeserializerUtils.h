@@ -17,8 +17,8 @@
 #ifndef QUERYENGINE_CALCITEDESERIALIZERUTILS_H
 #define QUERYENGINE_CALCITEDESERIALIZERUTILS_H
 
-#include "DateTruncate.h"
 #include "DateAdd.h"
+#include "DateTruncate.h"
 
 #include "../Shared/sqldefs.h"
 #include "../Shared/sqltypes.h"
@@ -108,6 +108,9 @@ inline SQLAgg to_agg_kind(const std::string& agg_name) {
   if (agg_name == std::string("APPROX_COUNT_DISTINCT")) {
     return kAPPROX_COUNT_DISTINCT;
   }
+  if (agg_name == std::string("SAMPLE") || agg_name == std::string("LAST_SAMPLE")) {
+    return kSAMPLE;
+  }
   throw std::runtime_error("Aggregate function " + agg_name + " not supported");
 }
 
@@ -117,6 +120,9 @@ inline SQLTypes to_sql_type(const std::string& type_name) {
   }
   if (type_name == std::string("INTEGER")) {
     return kINT;
+  }
+  if (type_name == std::string("TINYINT")) {
+    return kTINYINT;
   }
   if (type_name == std::string("SMALLINT")) {
     return kSMALLINT;
@@ -148,11 +154,14 @@ inline SQLTypes to_sql_type(const std::string& type_name) {
   if (type_name == std::string("NULL")) {
     return kNULLT;
   }
-  if (type_name == std::string("INTERVAL_DAY") || type_name == std::string("INTERVAL_HOUR") ||
-      type_name == std::string("INTERVAL_MINUTE") || type_name == std::string("INTERVAL_SECOND")) {
+  if (type_name == std::string("INTERVAL_DAY") ||
+      type_name == std::string("INTERVAL_HOUR") ||
+      type_name == std::string("INTERVAL_MINUTE") ||
+      type_name == std::string("INTERVAL_SECOND")) {
     return kINTERVAL_DAY_TIME;
   }
-  if (type_name == std::string("INTERVAL_MONTH") || type_name == std::string("INTERVAL_YEAR")) {
+  if (type_name == std::string("INTERVAL_MONTH") ||
+      type_name == std::string("INTERVAL_YEAR")) {
     return kINTERVAL_YEAR_MONTH;
   }
   throw std::runtime_error("Unsupported type: " + type_name);
@@ -163,7 +172,7 @@ namespace Analyzer {
 class Constant;
 class Expr;
 
-}  // Analyzer
+}  // namespace Analyzer
 
 SQLTypeInfo get_agg_type(const SQLAgg agg_kind, const Analyzer::Expr* arg_expr);
 
@@ -173,6 +182,7 @@ DateaddField to_dateadd_field(const std::string&);
 
 DatetruncField to_datediff_field(const std::string&);
 
-std::shared_ptr<Analyzer::Constant> make_fp_constant(const int64_t val, const SQLTypeInfo& ti);
+std::shared_ptr<Analyzer::Constant> make_fp_constant(const int64_t val,
+                                                     const SQLTypeInfo& ti);
 
 #endif  // QUERYENGINE_CALCITEDESERIALIZERUTILS_H

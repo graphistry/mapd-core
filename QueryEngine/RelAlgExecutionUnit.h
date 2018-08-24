@@ -26,14 +26,14 @@
 #ifndef QUERYENGINE_RELALGEXECUTIONUNIT_H
 #define QUERYENGINE_RELALGEXECUTIONUNIT_H
 
-#include "InputDescriptors.h"
 #include "../Shared/sqldefs.h"
+#include "InputDescriptors.h"
 
 #include <list>
 #include <memory>
 #include <vector>
 
-enum class SortAlgorithm { Default, SpeculativeTopN };
+enum class SortAlgorithm { Default, SpeculativeTopN, StreamingTopN };
 
 namespace Analyzer {
 
@@ -41,7 +41,7 @@ class Expr;
 class NDVEstimator;
 struct OrderEntry;
 
-}  // Analyzer
+}  // namespace Analyzer
 
 struct SortInfo {
   const std::list<Analyzer::OrderEntry> order_entries;
@@ -50,13 +50,21 @@ struct SortInfo {
   const size_t offset;
 };
 
+struct JoinCondition {
+  std::list<std::shared_ptr<Analyzer::Expr>> quals;
+  JoinType type;
+};
+
+typedef std::vector<JoinCondition> JoinQualsPerNestingLevel;
+
 struct RelAlgExecutionUnit {
   const std::vector<InputDescriptor> input_descs;
   const std::vector<InputDescriptor> extra_input_descs;
-  const std::list<std::shared_ptr<const InputColDescriptor>> input_col_descs;
-  const std::list<std::shared_ptr<Analyzer::Expr>> simple_quals;
-  const std::list<std::shared_ptr<Analyzer::Expr>> quals;
+  std::list<std::shared_ptr<const InputColDescriptor>> input_col_descs;
+  std::list<std::shared_ptr<Analyzer::Expr>> simple_quals;
+  std::list<std::shared_ptr<Analyzer::Expr>> quals;
   const JoinType join_type;
+  const JoinQualsPerNestingLevel inner_joins;
   const std::vector<std::pair<int, size_t>> join_dimensions;
   const std::list<std::shared_ptr<Analyzer::Expr>> inner_join_quals;
   const std::list<std::shared_ptr<Analyzer::Expr>> outer_join_quals;

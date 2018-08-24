@@ -24,9 +24,14 @@
 #ifndef CALCITE_H
 #define CALCITE_H
 
+#include "Shared/fixautotools.h"
+
 #include <thrift/protocol/TBinaryProtocol.h>
 #include <thrift/transport/TSocket.h>
 #include <thrift/transport/TTransportUtils.h>
+
+#include "Shared/fixautotools.h"
+
 #include <thread>
 #include "gen-cpp/CalciteServer.h"
 #include "rapidjson/document.h"
@@ -37,18 +42,38 @@ class SessionInfo;
 
 class Calcite {
  public:
-  Calcite(const int mapd_port, const int port, const std::string& data_dir, const size_t calcite_max_mem);
-  std::string process(const Catalog_Namespace::SessionInfo& session_info,
+  Calcite(const int mapd_port,
+          const int port,
+          const std::string& data_dir,
+          const size_t calcite_max_mem)
+      : Calcite(mapd_port, port, data_dir, calcite_max_mem, ""){};
+  Calcite(const int mapd_port,
+          const int port,
+          const std::string& data_dir,
+          const size_t calcite_max_mem,
+          const std::string& session_prefix);
+  TPlanResult process(const Catalog_Namespace::SessionInfo& session_info,
                       const std::string sql_string,
                       const bool legacy_syntax,
                       const bool is_explain);
+  std::vector<TCompletionHint> getCompletionHints(
+      const Catalog_Namespace::SessionInfo& session_info,
+      const std::vector<std::string>& visible_tables,
+      const std::string sql_string,
+      const int cursor);
   std::string getExtensionFunctionWhitelist();
   void updateMetadata(std::string catalog, std::string table);
+  void close_calcite_server();
   virtual ~Calcite();
 
+  std::string& get_session_prefix() { return session_prefix_; }
+
  private:
-  void runServer(const int mapd_port, const int port, const std::string& data_dir, const size_t calcite_max_mem);
-  std::string processImpl(const Catalog_Namespace::SessionInfo& session_info,
+  void runServer(const int mapd_port,
+                 const int port,
+                 const std::string& data_dir,
+                 const size_t calcite_max_mem);
+  TPlanResult processImpl(const Catalog_Namespace::SessionInfo& session_info,
                           const std::string sql_string,
                           const bool legacy_syntax,
                           const bool is_explain);
@@ -59,6 +84,7 @@ class Calcite {
 
   bool server_available_;
   int remote_calcite_port_ = -1;
+  std::string session_prefix_;
 };
 
 #endif /* CALCITE_H */

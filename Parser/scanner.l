@@ -24,8 +24,10 @@ using namespace std;
 
 ALL		{ yylval.qualval = kALL; TOK(ALL) }
 ALTER         TOK(ALTER)
+ADD           TOK(ADD)
 AND           TOK(AND)
 ANY           { yylval.qualval = kANY; TOK(ANY) }
+ARRAY         TOK(ARRAY)
 AS            TOK(AS)
 ASC           TOK(ASC)
 AUTHORIZATION	TOK(AUTHORIZATION)
@@ -71,6 +73,8 @@ FOR           TOK(FOR)
 FOREIGN       TOK(FOREIGN)
 FOUND         TOK(FOUND)
 FROM          TOK(FROM)
+GEOGRAPHY     TOK(GEOGRAPHY)
+GEOMETRY      TOK(GEOMETRY)
 GRANT         TOK(GRANT)
 GROUP         TOK(GROUP)
 HAVING        TOK(HAVING)
@@ -86,7 +90,9 @@ LAST          TOK(LAST)
 LENGTH        TOK(LENGTH)
 LIKE          TOK(LIKE)
 LIMIT         TOK(LIMIT)
+LINESTRING    TOK(LINESTRING)
 MOD           TOK(MOD)
+MULTIPOLYGON  TOK(MULTIPOLYGON)
 NOT           TOK(NOT)
 NOW           TOK(NOW)
 NULL          TOK(NULLX)
@@ -98,6 +104,8 @@ OPEN          TOK(OPEN)
 OPTION        TOK(OPTION)
 OR            TOK(OR)
 ORDER         TOK(ORDER)
+POINT         TOK(POINT)
+POLYGON       TOK(POLYGON)
 PRECISION     TOK(PRECISION)
 PRIMARY       TOK(PRIMARY)
 PRIVILEGES		TOK(PRIVILEGES)
@@ -122,6 +130,7 @@ TEXT          TOK(TEXT)
 THEN          TOK(THEN)
 TIME          TOK(TIME)
 TIMESTAMP     TOK(TIMESTAMP)
+TINYINT       TOK(TINYINT)
 TO            TOK(TO)
 TRUNCATE      TOK(TRUNCATE)
 UNION         TOK(UNION)
@@ -150,6 +159,9 @@ WORK          TOK(WORK)
 
 	/* names */
 [A-Za-z_][A-Za-z0-9\$_]*	{ yylval.stringval = new std::string(yytext); TOK(NAME) }
+
+	/* emails */
+([^[:space:]\"]+|\".+\")@[A-Za-z0-9][A-Za-z0-9\-\.]*\.[A-Za-z]+	{ yylval.stringval = new std::string(yytext); TOK(EMAIL) }
 
 	/* parameters */
 ":"[A-Za-z][A-Za-z0-9_]*	TOK(PARAMETER)

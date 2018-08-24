@@ -9,24 +9,41 @@ import com.mapd.thrift.server.TColumnType;
 import com.mapd.thrift.server.TDatumType;
 import com.mapd.thrift.server.TTableDetails;
 import com.mapd.thrift.server.TTypeInfo;
+
+import java.util.concurrent.atomic.AtomicLong;
+
+import org.apache.calcite.config.CalciteConnectionConfig;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.schema.Schema;
 import org.apache.calcite.schema.Statistic;
 import org.apache.calcite.schema.Statistics;
 import org.apache.calcite.schema.Table;
+import org.apache.calcite.sql.SqlCall;
+import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.mapd.metadata.PointSqlType;
+import com.mapd.metadata.LinestringSqlType;
+import com.mapd.metadata.PolygonSqlType;
 
 /**
  *
  * @author michael
  */
 public class MapDTable implements Table {
+  
+  private static final AtomicLong VERSION_PROVIDER = new AtomicLong();
 
   final static Logger MAPDLOGGER = LoggerFactory.getLogger(MapDTable.class);
   private final TTableDetails rowInfo;
+  private final long version = VERSION_PROVIDER.incrementAndGet();
+  
+  public long getVersion() {
+    return version;
+  }
 
   public MapDTable(TTableDetails ri) {
     rowInfo = ri;
@@ -61,13 +78,12 @@ public class MapDTable implements Table {
 
   private RelDataType createType(TColumnType value, RelDataTypeFactory typeFactory) {
     RelDataType cType = getRelDataType(value.col_type.type, value.col_type.precision, value.col_type.scale, typeFactory);
+    
     if (value.col_type.is_array) {
-      if (value.col_type.isNullable()) {
-        return typeFactory.createArrayType(typeFactory.createTypeWithNullability(cType, true), -1);
-      } else {
-        return typeFactory.createArrayType(cType, -1);
-      }
-    } else if (value.col_type.isNullable()) {
+      cType = typeFactory.createArrayType(typeFactory.createTypeWithNullability(cType, true), -1);
+    }
+    
+    if (value.col_type.isNullable()) {
       return typeFactory.createTypeWithNullability(cType, true);
     } else {
       return cType;
@@ -78,8 +94,9 @@ public class MapDTable implements Table {
   // todo confirm whether it is ok to ignore thinsg like lengths
   // since we do not use them on the validator side of the calcite 'fence'
   private RelDataType getRelDataType(TDatumType dType, int precision, int scale, RelDataTypeFactory typeFactory) {
-
     switch (dType) {
+      case TINYINT:
+        return typeFactory.createSqlType(SqlTypeName.TINYINT);
       case SMALLINT:
         return typeFactory.createSqlType(SqlTypeName.SMALLINT);
       case INT:
@@ -106,8 +123,30 @@ public class MapDTable implements Table {
         return typeFactory.createSqlType(SqlTypeName.INTERVAL_DAY);
       case INTERVAL_YEAR_MONTH:
         return typeFactory.createSqlType(SqlTypeName.INTERVAL_YEAR_MONTH);
+      case POINT:
+        return typeFactory.createSqlType(SqlTypeName.ANY);
+        //return new PointSqlType();
+      case LINESTRING:
+        return typeFactory.createSqlType(SqlTypeName.ANY);
+        //return new LinestringSqlType();
+      case POLYGON:
+        return typeFactory.createSqlType(SqlTypeName.ANY);
+        //return new PolygonSqlType();
+      case MULTIPOLYGON:
+        return typeFactory.createSqlType(SqlTypeName.ANY);
       default:
         throw new AssertionError(dType.name());
     }
   }
+
+    @Override
+    public boolean isRolledUp(String string) {
+        //will set to false by default
+        return false;
+    }
+
+    @Override
+    public boolean rolledUpColumnValidInsideAgg(String string, SqlCall sc, SqlNode sn, CalciteConnectionConfig ccc) {
+        throw new UnsupportedOperationException("rolledUpColumnValidInsideAgg Not supported yet.");
+    }
 }

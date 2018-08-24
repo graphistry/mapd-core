@@ -4,7 +4,8 @@
 %define CONSTRUCTOR_INIT : lexer(yylval)
 %define MEMBERS                                                                                                         \
   virtual ~SQLParser() {}                                                                                               \
-  int parse(const std::string & inputStr, std::list<std::unique_ptr<Stmt>>& parseTrees, std::string &lastParsed) {      \
+  int parse(const std::string & inputStrOrig, std::list<std::unique_ptr<Stmt>>& parseTrees, std::string &lastParsed) {  \
+    auto inputStr = boost::algorithm::trim_right_copy_if(inputStrOrig, boost::is_any_of(";") || boost::is_space()) + ";"; \
     boost::regex create_view_expr{R"(CREATE\s+VIEW\s+(IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9\$_]*)\s+AS\s+(.*);?)", \
                                   boost::regex::extended | boost::regex::icase};                                        \
     std::lock_guard<std::mutex> lock(mutex_);                                                                           \
@@ -33,21 +34,23 @@
       parseTrees.emplace_back(new CreateTableAsSelectStmt(table_name, select_query, true));                             \
       return 0;                                                                                                         \
     }                                                                                                                   \
-    boost::regex create_role_expr{R"(CREATE\s+ROLE\s+([A-Za-z_][A-Za-z0-9\$_]*)\s*;)",                                  \
+    std::string rolename_regex = R"(([A-Za-z_][A-Za-z0-9\$_\-]*))";                                                     \
+    boost::regex create_role_expr{R"(CREATE\s+ROLE\s+)" + rolename_regex + R"(\s*;)",                                   \
                                   boost::regex::extended | boost::regex::icase};                                        \
     if (boost::regex_match(trimmed_input.cbegin(), trimmed_input.cend(), what, create_role_expr)) {                     \
       const auto role_name = what[1].str();                                                                             \
       parseTrees.emplace_back(new CreateRoleStmt(role_name));                                                           \
       return 0;                                                                                                         \
     }                                                                                                                   \
-    boost::regex drop_role_expr{R"(DROP\s+ROLE\s+([A-Za-z_][A-Za-z0-9\$_]*)\s*;)",                                      \
+    boost::regex drop_role_expr{R"(DROP\s+ROLE\s+)" + rolename_regex + R"(\s*;)",                                       \
                                 boost::regex::extended | boost::regex::icase};                                          \
     if (boost::regex_match(trimmed_input.cbegin(), trimmed_input.cend(), what, drop_role_expr)) {                       \
       const auto role_name = what[1].str();                                                                             \
       parseTrees.emplace_back(new DropRoleStmt(role_name));                                                             \
       return 0;                                                                                                         \
     }                                                                                                                   \
-    boost::regex grant_privileges_expr{R"(GRANT\s+([A-Za-z_][A-Za-z0-9\$_]*)\s+ON\s+([A-Za-z][A-Za-z]*)\s+([A-Za-z_][A-Za-z0-9\$_\.]*)\s+TO\s+([A-Za-z_][A-Za-z0-9\$_]*)\s*;)", \
+    std::string grantee_regex = R"((([A-Za-z_][A-Za-z0-9\$_\-]*)|([^\s"]+|".+")@[A-Za-z0-9][A-Za-z0-9\-\.]*\.[A-Za-z]+))"; \
+    boost::regex grant_privileges_expr{R"(GRANT\s+([A-Za-z_][A-Za-z0-9\$_\s]*)\s+ON\s+([A-Za-z][A-Za-z]*)\s+([A-Za-z0-9\$_\.]*)\s+TO\s+)" + grantee_regex + R"(\s*;)", \
                                        boost::regex::extended | boost::regex::icase};                                   \
     if (boost::regex_match(trimmed_input.cbegin(), trimmed_input.cend(), what, grant_privileges_expr)) {                \
       const auto priv = what[1].str();                                                                                  \
@@ -57,7 +60,7 @@
       parseTrees.emplace_back(new GrantPrivilegesStmt(priv, object_type, object_name, role_name));                      \
       return 0;                                                                                                         \
     }                                                                                                                   \
-    boost::regex revoke_privileges_expr{R"(REVOKE\s+([A-Za-z_][A-Za-z0-9\$_]*)\s+ON\s+([A-Za-z][A-Za-z]*)\s+([A-Za-z_][A-Za-z0-9\$_\.]*)\s+FROM\s+([A-Za-z_][A-Za-z0-9\$_]*)\s*;)", \
+    boost::regex revoke_privileges_expr{R"(REVOKE\s+([A-Za-z_][A-Za-z0-9\$_\s]*)\s+ON\s+([A-Za-z][A-Za-z]*)\s+([A-Za-z0-9\$_\.]*)\s+FROM\s+)" + grantee_regex + R"(\s*;)", \
                                        boost::regex::extended | boost::regex::icase};                                   \
     if (boost::regex_match(trimmed_input.cbegin(), trimmed_input.cend(), what, revoke_privileges_expr)) {               \
       const auto priv = what[1].str();                                                                                  \
@@ -67,7 +70,7 @@
       parseTrees.emplace_back(new RevokePrivilegesStmt(priv, object_type, object_name, role_name));                     \
       return 0;                                                                                                         \
     }                                                                                                                   \
-    boost::regex show_privileges_expr{R"(SHOW\s+ON\s+([A-Za-z][A-Za-z]*)\s+([A-Za-z_][A-Za-z0-9\$_\.]*)\s+FOR\s+([A-Za-z_][A-Za-z0-9\$_]*)\s*;)", \
+    boost::regex show_privileges_expr{R"(SHOW\s+ON\s+([A-Za-z][A-Za-z]*)\s+([A-Za-z0-9\$_\.]*)\s+FOR\s+)" + grantee_regex + R"(\s*;)", \
                                        boost::regex::extended | boost::regex::icase};                                   \
     if (boost::regex_match(trimmed_input.cbegin(), trimmed_input.cend(), what, show_privileges_expr)) {                 \
       const auto object_type = what[1].str();                                                                           \
@@ -76,7 +79,7 @@
       parseTrees.emplace_back(new ShowPrivilegesStmt(object_type, object_name, role_name));                             \
       return 0;                                                                                                         \
     }                                                                                                                   \
-    boost::regex grant_role_expr{R"(GRANT\s+([A-Za-z_][A-Za-z0-9\$_]*)\s+TO\s+(.*);)",                           \
+    boost::regex grant_role_expr{R"(GRANT\s+)" + rolename_regex + R"(\s+TO\s+)" + grantee_regex + R"(\s*;)",            \
                                  boost::regex::extended | boost::regex::icase};                                         \
     if (boost::regex_match(trimmed_input.cbegin(), trimmed_input.cend(), what, grant_role_expr)) {                      \
       const auto role_name = what[1].str();                                                                             \
@@ -84,14 +87,14 @@
       parseTrees.emplace_back(new GrantRoleStmt(role_name, user_name));                                                 \
       return 0;                                                                                                         \
     }                                                                                                                   \
-    boost::regex revoke_role_expr{R"(REVOKE\s+([A-Za-z_][A-Za-z0-9\$_]*)\s+FROM\s+(.*);)",                       \
+    boost::regex revoke_role_expr{R"(REVOKE\s+)" + rolename_regex + R"(\s+FROM\s+)" + grantee_regex + R"(\s*;)",        \
                                   boost::regex::extended | boost::regex::icase};                                        \
     if (boost::regex_match(trimmed_input.cbegin(), trimmed_input.cend(), what, revoke_role_expr)) {                     \
       const auto role_name = what[1].str();                                                                             \
       const auto user_name = what[2].str();                                                                             \
       parseTrees.emplace_back(new RevokeRoleStmt(role_name, user_name));                                                \
       return 0;                                                                                                         \
-    }															\
+    }                                                                                                                   \
     std::istringstream ss(inputStr);                                                                                    \
     lexer.switch_streams(&ss,0);                                                                                        \
     yyparse(parseTrees);                                                                                                \
@@ -148,6 +151,7 @@ using namespace Parser;
 	/* symbolic tokens */
 
 %token NAME
+%token EMAIL
 %token STRING FWDSTR
 %token INTNUM FIXEDNUM
 
@@ -163,14 +167,14 @@ using namespace Parser;
 
 	/* literal keyword tokens */
 
-%token ALL ALTER AMMSC ANY AS ASC AUTHORIZATION BETWEEN BIGINT BOOLEAN BY
+%token ADD ALL ALTER AMMSC ANY ARRAY AS ASC AUTHORIZATION BETWEEN BIGINT BOOLEAN BY
 %token CASE CAST CHAR_LENGTH CHARACTER CHECK CLOSE COLUMN COMMIT CONTINUE COPY CREATE CURRENT
 %token CURSOR DATABASE DATE DATETIME DATE_TRUNC DECIMAL DECLARE DEFAULT DELETE DESC DICTIONARY DISTINCT DOUBLE DROP
 %token ELSE END EXISTS EXPLAIN EXTRACT FETCH FIRST FLOAT FOR FOREIGN FOUND FROM
-%token GRANT GROUP HAVING IF ILIKE IN INSERT INTEGER INTO
-%token IS LANGUAGE LAST LENGTH LIKE LIMIT MOD NOW NULLX NUMERIC OF OFFSET ON OPEN OPTION
-%token ORDER PARAMETER PRECISION PRIMARY PRIVILEGES PROCEDURE
-%token SMALLINT SOME TABLE TEMPORARY TEXT THEN TIME TIMESTAMP TO TRUNCATE UNION
+%token GEOGRAPHY GEOMETRY GRANT GROUP HAVING IF ILIKE IN INSERT INTEGER INTO
+%token IS LANGUAGE LAST LENGTH LIKE LIMIT LINESTRING MOD MULTIPOLYGON NOW NULLX NUMERIC OF OFFSET ON OPEN OPTION
+%token ORDER PARAMETER POINT POLYGON PRECISION PRIMARY PRIVILEGES PROCEDURE
+%token SMALLINT SOME TABLE TEMPORARY TEXT THEN TIME TIMESTAMP TINYINT TO TRUNCATE UNION
 %token PUBLIC REAL REFERENCES RENAME REVOKE ROLE ROLLBACK SCHEMA SELECT SET SHARD SHARED SHOW
 %token UNIQUE UPDATE USER VALUES VIEW WHEN WHENEVER WHERE WITH WORK
 
@@ -197,6 +201,7 @@ sql:		/* schema {	$<nodeval>$ = $<nodeval>1; } */
 	| truncate_table_statement { $<nodeval>$ = $<nodeval>1; }
 	| rename_table_statement { $<nodeval>$ = $<nodeval>1; }
 	| rename_column_statement { $<nodeval>$ = $<nodeval>1; }
+	| add_column_statement { $<nodeval>$ = $<nodeval>1; }
   | copy_table_statement { $<nodeval>$ = $<nodeval>1; }
 	| create_database_statement { $<nodeval>$ = $<nodeval>1; }
 	| drop_database_statement { $<nodeval>$ = $<nodeval>1; }
@@ -235,6 +240,10 @@ schema_element:
 	;
 NOT SUPPORTED */
 
+username:
+        NAME | EMAIL
+    ;
+
 create_database_statement:
 		CREATE DATABASE NAME
 		{
@@ -252,19 +261,19 @@ drop_database_statement:
 		}
 		;
 create_user_statement:
-		CREATE USER NAME '(' name_eq_value_list ')'
+		CREATE USER username '(' name_eq_value_list ')'
 		{
 			$<nodeval>$ = new CreateUserStmt($<stringval>3, reinterpret_cast<std::list<NameValueAssign*>*>($<listval>5));
 		}
 		;
 drop_user_statement:
-		DROP USER NAME
+		DROP USER username
 		{
 			$<nodeval>$ = new DropUserStmt($<stringval>3);
 		}
 		;
 alter_user_statement:
-		ALTER USER NAME '(' name_eq_value_list ')'
+		ALTER USER username '(' name_eq_value_list ')'
 		{
 			$<nodeval>$ = new AlterUserStmt($<stringval>3, reinterpret_cast<std::list<NameValueAssign*>*>($<listval>5));
 		}
@@ -335,6 +344,29 @@ rename_column_statement:
 		ALTER TABLE table RENAME COLUMN column TO column
 		{
 		   $<nodeval>$ = new RenameColumnStmt($<stringval>3, $<stringval>6, $<stringval>8);
+		}
+		;
+
+opt_column:
+		| COLUMN;
+
+column_defs:
+		 column_def	{ $<listval>$ = new std::list<Node*>(1, $<nodeval>1); }
+		|column_defs ',' column_def
+		{
+			$<listval>$ = $<listval>1;
+			$<listval>$->push_back($<nodeval>3);
+		}
+		;
+
+add_column_statement:
+		 ALTER TABLE table ADD opt_column column_def
+		{
+		   $<nodeval>$ = new AddColumnStmt($<stringval>3, dynamic_cast<ColumnDef*>($<nodeval>6));
+		}
+		|ALTER TABLE table ADD '(' column_defs ')' 
+		{
+		   $<nodeval>$ = new AddColumnStmt($<stringval>3, reinterpret_cast<std::list<ColumnDef*>*>($<nodeval>6));
 		}
 		;
 
@@ -1082,18 +1114,25 @@ function_ref:
 	;
 
 literal:
-    STRING { $<nodeval>$ = new StringLiteral($<stringval>1); }
-  | INTNUM { $<nodeval>$ = new IntLiteral($<intval>1); }
-  | NOW '(' ')' { $<nodeval>$ = new TimestampLiteral(); }
-  | DATETIME '(' general_exp ')' { delete dynamic_cast<Expr*>($<nodeval>3); $<nodeval>$ = new TimestampLiteral(); }
-  | FIXEDNUM
-  {
-    $<nodeval>$ = new FixedPtLiteral($<stringval>1);
-  }
-	| FLOAT { $<nodeval>$ = new FloatLiteral($<floatval>1); }
-	| DOUBLE { $<nodeval>$ = new DoubleLiteral($<doubleval>1); }
-	| data_type STRING
-	{ $<nodeval>$ = new CastExpr(new StringLiteral($<stringval>2), dynamic_cast<SQLType*>($<nodeval>1)); }
+		STRING { $<nodeval>$ = new StringLiteral($<stringval>1); }
+	|	INTNUM { $<nodeval>$ = new IntLiteral($<intval>1); }
+	|	NOW '(' ')' { $<nodeval>$ = new TimestampLiteral(); }
+	|	DATETIME '(' general_exp ')' { delete dynamic_cast<Expr*>($<nodeval>3); $<nodeval>$ = new TimestampLiteral(); }
+	|	FIXEDNUM { $<nodeval>$ = new FixedPtLiteral($<stringval>1); }
+	|	FLOAT { $<nodeval>$ = new FloatLiteral($<floatval>1); }
+	|	DOUBLE { $<nodeval>$ = new DoubleLiteral($<doubleval>1); }
+	|	data_type STRING { $<nodeval>$ = new CastExpr(new StringLiteral($<stringval>2), dynamic_cast<SQLType*>($<nodeval>1)); }
+	|	'{' literal_commalist '}' { $<nodeval>$ = new ArrayLiteral(reinterpret_cast<std::list<Expr*>*>($<listval>2)); }
+	|	ARRAY '[' literal_commalist ']' { $<nodeval>$ = new ArrayLiteral(reinterpret_cast<std::list<Expr*>*>($<listval>3)); }
+	;
+
+literal_commalist:
+		literal { $<listval>$ = new std::list<Node*>(1, $<nodeval>1); }
+	|	literal_commalist ',' literal
+	{
+		$<listval>$ = $<listval>1;
+		$<listval>$->push_back($<nodeval>3);
+	}
 	;
 
 	/* miscellaneous */
@@ -1144,6 +1183,7 @@ data_type:
 	|	DECIMAL '(' non_neg_int ')' { $<nodeval>$ = new SQLType(kDECIMAL, $<intval>3); }
 	|	DECIMAL '(' non_neg_int ',' non_neg_int ')' { $<nodeval>$ = new SQLType(kDECIMAL, $<intval>3, $<intval>5, false); }
 	|	INTEGER { $<nodeval>$ = new SQLType(kINT); }
+	|	TINYINT { $<nodeval>$ = new SQLType(kTINYINT); }
 	|	SMALLINT { $<nodeval>$ = new SQLType(kSMALLINT); }
 	|	FLOAT { $<nodeval>$ = new SQLType(kFLOAT); }
 	/* |	FLOAT '(' non_neg_int ')' { $<nodeval>$ = new SQLType(kFLOAT, $<intval>3); } */
@@ -1155,12 +1195,41 @@ data_type:
 	| TIME '(' non_neg_int ')' { $<nodeval>$ = new SQLType(kTIME, $<intval>3); }
 	| TIMESTAMP { $<nodeval>$ = new SQLType(kTIMESTAMP); }
 	| TIMESTAMP '(' non_neg_int ')' { $<nodeval>$ = new SQLType(kTIMESTAMP, $<intval>3); }
-  | data_type '[' ']'
-  { $<nodeval>$ = $<nodeval>1;
-    if (dynamic_cast<SQLType*>($<nodeval>$)->get_is_array())
-      throw std::runtime_error("array of array not supported.");
-    dynamic_cast<SQLType*>($<nodeval>$)->set_is_array(true); }
+	| geo_type { $<nodeval>$ = new SQLType(static_cast<SQLTypes>($<intval>1), static_cast<int>(kGEOMETRY), 0, false); }
+        /* | geography_type { $<nodeval>$ = $<nodeval>1; } */
+	| geometry_type { $<nodeval>$ = $<nodeval>1; }
+	| data_type '[' ']'
+	{
+		$<nodeval>$ = $<nodeval>1;
+		if (dynamic_cast<SQLType*>($<nodeval>$)->get_is_array())
+		  throw std::runtime_error("array of array not supported.");
+		dynamic_cast<SQLType*>($<nodeval>$)->set_is_array(true);
+	}
+	| data_type '[' non_neg_int ']'
+	{
+		$<nodeval>$ = $<nodeval>1;
+		if (dynamic_cast<SQLType*>($<nodeval>$)->get_is_array())
+		  throw std::runtime_error("array of array not supported.");
+		dynamic_cast<SQLType*>($<nodeval>$)->set_is_array(true);
+		dynamic_cast<SQLType*>($<nodeval>$)->set_array_size($<intval>3);
+	}
 	;
+
+geo_type:	POINT { $<intval>$ = kPOINT; }
+	|	LINESTRING { $<intval>$ = kLINESTRING; }
+	|	POLYGON { $<intval>$ = kPOLYGON; }
+	|	MULTIPOLYGON { $<intval>$ = kMULTIPOLYGON; }
+	;
+
+geography_type:	GEOGRAPHY '(' geo_type ')'
+		{ $<nodeval>$ = new SQLType(static_cast<SQLTypes>($<intval>3), static_cast<int>(kGEOGRAPHY), 4326, false); }
+	|	GEOGRAPHY '(' geo_type ',' INTNUM ')'
+		{ $<nodeval>$ = new SQLType(static_cast<SQLTypes>($<intval>3), static_cast<int>(kGEOGRAPHY), $<intval>5, false); }
+
+geometry_type:	GEOMETRY '(' geo_type ')'
+		{ $<nodeval>$ = new SQLType(static_cast<SQLTypes>($<intval>3), static_cast<int>(kGEOMETRY), 0, false); }
+	|	GEOMETRY '(' geo_type ',' INTNUM ')'
+		{ $<nodeval>$ = new SQLType(static_cast<SQLTypes>($<intval>3), static_cast<int>(kGEOMETRY), $<intval>5, false); }
 
 	/* the various things you can name */
 

@@ -49,11 +49,15 @@ inline const SQLTypeInfo& get_compact_type(const TargetInfo& target) {
     return target.sql_type;
   }
 
-  return (agg_type != kCOUNT && agg_type != kAPPROX_COUNT_DISTINCT) ? agg_arg : target.sql_type;
+  return (agg_type != kCOUNT && agg_type != kAPPROX_COUNT_DISTINCT) ? agg_arg
+                                                                    : target.sql_type;
 }
 
 template <typename T>
-inline bool detect_overflow_and_underflow(const T a, const T b, const bool nullable, const T null_val) {
+inline bool detect_overflow_and_underflow(const T a,
+                                          const T b,
+                                          const bool nullable,
+                                          const T null_val) {
 #ifdef ENABLE_COMPACTION
   if (nullable) {
     if (a == null_val || b == null_val) {
@@ -92,6 +96,8 @@ inline int64_t inline_int_null_val(const SQLTypeInfo& ti) {
   }
   switch (type) {
     case kBOOLEAN:
+      return inline_int_null_value<int8_t>();
+    case kTINYINT:
       return inline_int_null_value<int8_t>();
     case kSMALLINT:
       return inline_int_null_value<int16_t>();
@@ -159,6 +165,8 @@ inline size_t get_bit_width(const SQLTypeInfo& ti) {
   switch (int_type) {
     case kBOOLEAN:
       return 8;
+    case kTINYINT:
+      return 8;
     case kSMALLINT:
       return 16;
     case kINT:
@@ -180,10 +188,21 @@ inline size_t get_bit_width(const SQLTypeInfo& ti) {
     case kCHAR:
       return 32;
     case kARRAY:
-      throw std::runtime_error("Projecting on array columns not supported yet.");
+      if (ti.get_size() == -1)
+        throw std::runtime_error("Projecting on unsized array column not supported.");
+      return ti.get_size() * 8;
+    case kPOINT:
+    case kLINESTRING:
+    case kPOLYGON:
+    case kMULTIPOLYGON:
+      return 32;
     default:
       abort();
   }
+}
+
+inline bool is_unsigned_type(const SQLTypeInfo& ti) {
+  return ti.get_compression() == kENCODING_DICT && ti.get_size() < ti.get_logical_size();
 }
 
 #endif  // QUERYENGINE_SQLTYPESLAYOUT_H

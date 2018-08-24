@@ -15,17 +15,23 @@
  */
 
 #include "Encoder.h"
-#include "NoneEncoder.h"
-#include "FixedLengthEncoder.h"
-#include "StringNoneEncoder.h"
-#include "ArrayNoneEncoder.h"
 #include <glog/logging.h>
+#include "ArrayNoneEncoder.h"
+#include "FixedLengthArrayNoneEncoder.h"
+#include "FixedLengthEncoder.h"
+#include "NoneEncoder.h"
+#include "StringNoneEncoder.h"
 
-Encoder* Encoder::Create(Data_Namespace::AbstractBuffer* buffer, const SQLTypeInfo sqlType) {
+Encoder* Encoder::Create(Data_Namespace::AbstractBuffer* buffer,
+                         const SQLTypeInfo sqlType) {
   switch (sqlType.get_compression()) {
     case kENCODING_NONE: {
       switch (sqlType.get_type()) {
         case kBOOLEAN: {
+          return new NoneEncoder<int8_t>(buffer);
+          break;
+        }
+        case kTINYINT: {
           return new NoneEncoder<int8_t>(buffer);
           break;
         }
@@ -55,12 +61,21 @@ Encoder* Encoder::Create(Data_Namespace::AbstractBuffer* buffer, const SQLTypeIn
         case kVARCHAR:
         case kCHAR:
           return new StringNoneEncoder(buffer);
-        case kARRAY:
+        case kARRAY: {
+          if (sqlType.get_size() > 0) {
+            return new FixedLengthArrayNoneEncoder(buffer, sqlType.get_size());
+          }
           return new ArrayNoneEncoder(buffer);
+        }
         case kTIME:
         case kTIMESTAMP:
         case kDATE:
           return new NoneEncoder<time_t>(buffer);
+        case kPOINT:
+        case kLINESTRING:
+        case kPOLYGON:
+        case kMULTIPOLYGON:
+          return new StringNoneEncoder(buffer);
         default: { return 0; }
       }
       break;
@@ -151,6 +166,17 @@ Encoder* Encoder::Create(Data_Namespace::AbstractBuffer* buffer, const SQLTypeIn
             CHECK(false);
             break;
         }
+      }
+      break;
+    }
+    case kENCODING_GEOINT: {
+      switch (sqlType.get_type()) {
+        case kPOINT:
+        case kLINESTRING:
+        case kPOLYGON:
+        case kMULTIPOLYGON:
+          return new StringNoneEncoder(buffer);
+        default: { return 0; }
       }
       break;
     }

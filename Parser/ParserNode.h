@@ -24,23 +24,18 @@
 #ifndef PARSER_NODE_H_
 #define PARSER_NODE_H_
 
+#include <cstdint>
+#include <cstring>
 #include <list>
 #include <string>
-#include <cstring>
-#include <cstdint>
-#include "../Shared/sqltypes.h"
-#include "../Shared/sqldefs.h"
 #include "../Analyzer/Analyzer.h"
 #include "../Catalog/Catalog.h"
+#include "../Shared/sqldefs.h"
+#include "../Shared/sqltypes.h"
+
+#include <Import/Importer.h>
 
 #include <functional>
-
-namespace Importer_NS {
-
-struct CopyParams;
-class Importer;
-
-}  // Importer_NS
 
 namespace Parser {
 
@@ -60,14 +55,19 @@ class Node {
  */
 class SQLType : public Node {
  public:
-  explicit SQLType(SQLTypes t) : type(t), param1(-1), param2(0), is_array(false) {}
-  SQLType(SQLTypes t, int p1) : type(t), param1(p1), param2(0), is_array(false) {}
-  SQLType(SQLTypes t, int p1, int p2, bool a) : type(t), param1(p1), param2(p2), is_array(a) {}
+  explicit SQLType(SQLTypes t)
+      : type(t), param1(-1), param2(0), is_array(false), array_size(-1) {}
+  SQLType(SQLTypes t, int p1)
+      : type(t), param1(p1), param2(0), is_array(false), array_size(-1) {}
+  SQLType(SQLTypes t, int p1, int p2, bool a)
+      : type(t), param1(p1), param2(p2), is_array(a), array_size(-1) {}
   SQLTypes get_type() const { return type; }
   int get_param1() const { return param1; }
   int get_param2() const { return param2; }
   bool get_is_array() const { return is_array; }
   void set_is_array(bool a) { is_array = a; }
+  int get_array_size() const { return array_size; }
+  void set_array_size(int s) { array_size = s; }
   std::string to_string() const;
   void check_type();
 
@@ -76,6 +76,7 @@ class SQLType : public Node {
   int param1;  // e.g. for NUMERIC(10).  -1 means unspecified.
   int param2;  // e.g. for NUMERIC(10,3). 0 is default value.
   bool is_array;
+  int array_size;
 };
 
 /*
@@ -90,9 +91,10 @@ class Expr : public Node {
    * @param catalog The catalog object for the current database
    * @return An Analyzer::Expr object for the expression post semantic analysis
    */
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const = 0;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const = 0;
   virtual std::string to_string() const = 0;
 };
 
@@ -102,9 +104,10 @@ class Expr : public Node {
  */
 class Literal : public Expr {
  public:
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const = 0;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const = 0;
   virtual std::string to_string() const = 0;
 };
 
@@ -115,9 +118,10 @@ class Literal : public Expr {
 class NullLiteral : public Literal {
  public:
   NullLiteral() {}
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   virtual std::string to_string() const { return "NULL"; }
 };
 
@@ -129,9 +133,10 @@ class StringLiteral : public Literal {
  public:
   explicit StringLiteral(std::string* s) : stringval(s) {}
   const std::string* get_stringval() const { return stringval.get(); }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   static std::shared_ptr<Analyzer::Expr> analyzeValue(const std::string&);
   virtual std::string to_string() const { return "'" + *stringval + "'"; }
 
@@ -147,11 +152,14 @@ class IntLiteral : public Literal {
  public:
   explicit IntLiteral(int64_t i) : intval(i) {}
   int64_t get_intval() const { return intval; }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   static std::shared_ptr<Analyzer::Expr> analyzeValue(const int64_t intval);
-  virtual std::string to_string() const { return boost::lexical_cast<std::string>(intval); }
+  virtual std::string to_string() const {
+    return boost::lexical_cast<std::string>(intval);
+  }
 
  private:
   int64_t intval;
@@ -165,10 +173,13 @@ class FixedPtLiteral : public Literal {
  public:
   explicit FixedPtLiteral(std::string* n) : fixedptval(n) {}
   const std::string* get_fixedptval() const { return fixedptval.get(); }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
-  static std::shared_ptr<Analyzer::Expr> analyzeValue(const int64_t numericval, const int scale, const int precision);
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  static std::shared_ptr<Analyzer::Expr> analyzeValue(const int64_t numericval,
+                                                      const int scale,
+                                                      const int precision);
   virtual std::string to_string() const { return *fixedptval; }
 
  private:
@@ -183,10 +194,13 @@ class FloatLiteral : public Literal {
  public:
   explicit FloatLiteral(float f) : floatval(f) {}
   float get_floatval() const { return floatval; }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
-  virtual std::string to_string() const { return boost::lexical_cast<std::string>(floatval); }
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::string to_string() const {
+    return boost::lexical_cast<std::string>(floatval);
+  }
 
  private:
   float floatval;
@@ -200,10 +214,13 @@ class DoubleLiteral : public Literal {
  public:
   explicit DoubleLiteral(double d) : doubleval(d) {}
   double get_doubleval() const { return doubleval; }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
-  virtual std::string to_string() const { return boost::lexical_cast<std::string>(doubleval); }
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::string to_string() const {
+    return boost::lexical_cast<std::string>(doubleval);
+  }
 
  private:
   double doubleval;
@@ -217,11 +234,14 @@ class TimestampLiteral : public Literal {
  public:
   explicit TimestampLiteral() { time(&timestampval); }
   time_t get_timestampval() const { return timestampval; }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   static std::shared_ptr<Analyzer::Expr> get(const time_t);
-  virtual std::string to_string() const { return boost::lexical_cast<std::string>(timestampval); }
+  virtual std::string to_string() const {
+    return boost::lexical_cast<std::string>(timestampval);
+  }
 
  private:
   time_t timestampval;
@@ -234,10 +254,35 @@ class TimestampLiteral : public Literal {
 class UserLiteral : public Literal {
  public:
   UserLiteral() {}
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   virtual std::string to_string() const { return "USER"; }
+};
+
+/*
+ * @type ArrayLiteral
+ * @brief the literal for arrays
+ */
+class ArrayLiteral : public Literal {
+ public:
+  ArrayLiteral(std::list<Expr*>* v) {
+    CHECK(v);
+    for (const auto e : *v) {
+      value_list.emplace_back(e);
+    }
+    delete v;
+  }
+  const std::list<std::unique_ptr<Expr>>& get_value_list() const { return value_list; }
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::string to_string() const;
+
+ private:
+  std::list<std::unique_ptr<Expr>> value_list;
 };
 
 /*
@@ -246,18 +291,22 @@ class UserLiteral : public Literal {
  */
 class OperExpr : public Expr {
  public:
-  OperExpr(SQLOps t, Expr* l, Expr* r) : optype(t), opqualifier(kONE), left(l), right(r) {}
-  OperExpr(SQLOps t, SQLQualifier q, Expr* l, Expr* r) : optype(t), opqualifier(q), left(l), right(r) {}
+  OperExpr(SQLOps t, Expr* l, Expr* r)
+      : optype(t), opqualifier(kONE), left(l), right(r) {}
+  OperExpr(SQLOps t, SQLQualifier q, Expr* l, Expr* r)
+      : optype(t), opqualifier(q), left(l), right(r) {}
   SQLOps get_optype() const { return optype; }
   const Expr* get_left() const { return left.get(); }
   const Expr* get_right() const { return right.get(); }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
-  static std::shared_ptr<Analyzer::Expr> normalize(const SQLOps optype,
-                                                   const SQLQualifier qual,
-                                                   std::shared_ptr<Analyzer::Expr> left_expr,
-                                                   std::shared_ptr<Analyzer::Expr> right_expr);
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  static std::shared_ptr<Analyzer::Expr> normalize(
+      const SQLOps optype,
+      const SQLQualifier qual,
+      std::shared_ptr<Analyzer::Expr> left_expr,
+      std::shared_ptr<Analyzer::Expr> right_expr);
   virtual std::string to_string() const;
 
  private:
@@ -278,9 +327,10 @@ class SubqueryExpr : public Expr {
  public:
   explicit SubqueryExpr(QuerySpec* q) : query(q) {}
   const QuerySpec* get_query() const { return query.get(); }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   virtual std::string to_string() const;
 
  private:
@@ -291,9 +341,10 @@ class IsNullExpr : public Expr {
  public:
   IsNullExpr(bool n, Expr* a) : is_not(n), arg(a) {}
   bool get_is_not() const { return is_not; }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   virtual std::string to_string() const;
 
  private:
@@ -310,9 +361,10 @@ class InExpr : public Expr {
   InExpr(bool n, Expr* a) : is_not(n), arg(a) {}
   bool get_is_not() const { return is_not; }
   const Expr* get_arg() const { return arg.get(); }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const = 0;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const = 0;
   virtual std::string to_string() const;
 
  protected:
@@ -328,9 +380,10 @@ class InSubquery : public InExpr {
  public:
   InSubquery(bool n, Expr* a, SubqueryExpr* q) : InExpr(n, a), subquery(q) {}
   const SubqueryExpr* get_subquery() const { return subquery.get(); }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   virtual std::string to_string() const;
 
  private:
@@ -351,9 +404,10 @@ class InValues : public InExpr {
     delete v;
   }
   const std::list<std::unique_ptr<Expr>>& get_value_list() const { return value_list; }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   virtual std::string to_string() const;
 
  private:
@@ -366,14 +420,16 @@ class InValues : public InExpr {
  */
 class BetweenExpr : public Expr {
  public:
-  BetweenExpr(bool n, Expr* a, Expr* l, Expr* u) : is_not(n), arg(a), lower(l), upper(u) {}
+  BetweenExpr(bool n, Expr* a, Expr* l, Expr* u)
+      : is_not(n), arg(a), lower(l), upper(u) {}
   bool get_is_not() const { return is_not; }
   const Expr* get_arg() const { return arg.get(); }
   const Expr* get_lower() const { return lower.get(); }
   const Expr* get_upper() const { return upper.get(); }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   virtual std::string to_string() const;
 
  private:
@@ -393,9 +449,10 @@ class CharLengthExpr : public Expr {
   CharLengthExpr(Expr* a, bool e) : arg(a), calc_encoded_length(e) {}
   const Expr* get_arg() const { return arg.get(); }
   bool get_calc_encoded_length() const { return calc_encoded_length; }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   virtual std::string to_string() const;
 
  private:
@@ -415,9 +472,10 @@ class LikeExpr : public Expr {
   const Expr* get_arg() const { return arg.get(); }
   const Expr* get_like_string() const { return like_string.get(); }
   const Expr* get_escape_string() const { return escape_string.get(); }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   static std::shared_ptr<Analyzer::Expr> get(std::shared_ptr<Analyzer::Expr> arg_expr,
                                              std::shared_ptr<Analyzer::Expr> like_expr,
                                              std::shared_ptr<Analyzer::Expr> escape_expr,
@@ -443,14 +501,16 @@ class LikeExpr : public Expr {
  */
 class RegexpExpr : public Expr {
  public:
-  RegexpExpr(bool n, Expr* a, Expr* p, Expr* e) : is_not(n), arg(a), pattern_string(p), escape_string(e) {}
+  RegexpExpr(bool n, Expr* a, Expr* p, Expr* e)
+      : is_not(n), arg(a), pattern_string(p), escape_string(e) {}
   bool get_is_not() const { return is_not; }
   const Expr* get_arg() const { return arg.get(); }
   const Expr* get_pattern_string() const { return pattern_string.get(); }
   const Expr* get_escape_string() const { return escape_string.get(); }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   static std::shared_ptr<Analyzer::Expr> get(std::shared_ptr<Analyzer::Expr> arg_expr,
                                              std::shared_ptr<Analyzer::Expr> pattern_expr,
                                              std::shared_ptr<Analyzer::Expr> escape_expr,
@@ -477,9 +537,10 @@ class LikelihoodExpr : public Expr {
   bool get_is_not() const { return is_not; }
   const Expr* get_arg() const { return arg.get(); }
   float get_likelihood() const { return likelihood; }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   static std::shared_ptr<Analyzer::Expr> get(std::shared_ptr<Analyzer::Expr> arg_expr,
                                              float likelihood,
                                              const bool is_not);
@@ -499,9 +560,10 @@ class ExistsExpr : public Expr {
  public:
   explicit ExistsExpr(QuerySpec* q) : query(q) {}
   const QuerySpec* get_query() const { return query.get(); }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   virtual std::string to_string() const;
 
  private:
@@ -518,9 +580,10 @@ class ColumnRef : public Expr {
   ColumnRef(std::string* n1, std::string* n2) : table(n1), column(n2) {}
   const std::string* get_table() const { return table.get(); }
   const std::string* get_column() const { return column.get(); }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   virtual std::string to_string() const;
 
  private:
@@ -540,9 +603,10 @@ class FunctionRef : public Expr {
   const std::string* get_name() const { return name.get(); }
   bool get_distinct() const { return distinct; }
   Expr* get_arg() const { return arg.get(); }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   virtual std::string to_string() const;
 
  private:
@@ -554,10 +618,13 @@ class FunctionRef : public Expr {
 class CastExpr : public Expr {
  public:
   CastExpr(Expr* a, SQLType* t) : arg(a), target_type(t) {}
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
-  virtual std::string to_string() const { return "CAST(" + arg->to_string() + " AS " + target_type->to_string() + ")"; }
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::string to_string() const {
+    return "CAST(" + arg->to_string() + " AS " + target_type->to_string() + ")";
+  }
 
  private:
   std::unique_ptr<Expr> arg;
@@ -584,11 +651,13 @@ class CaseExpr : public Expr {
     }
     delete w;
   }
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
   static std::shared_ptr<Analyzer::Expr> normalize(
-      const std::list<std::pair<std::shared_ptr<Analyzer::Expr>, std::shared_ptr<Analyzer::Expr>>>&,
+      const std::list<
+          std::pair<std::shared_ptr<Analyzer::Expr>, std::shared_ptr<Analyzer::Expr>>>&,
       const std::shared_ptr<Analyzer::Expr>);
   virtual std::string to_string() const;
 
@@ -600,11 +669,14 @@ class CaseExpr : public Expr {
 class ExtractExpr : public Expr {
  public:
   ExtractExpr(std::string* f, Expr* a) : field(f), from_arg(a) {}
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
-  static std::shared_ptr<Analyzer::Expr> get(const std::shared_ptr<Analyzer::Expr>, const std::string&);
-  static std::shared_ptr<Analyzer::Expr> get(const std::shared_ptr<Analyzer::Expr>, const ExtractField);
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  static std::shared_ptr<Analyzer::Expr> get(const std::shared_ptr<Analyzer::Expr>,
+                                             const std::string&);
+  static std::shared_ptr<Analyzer::Expr> get(const std::shared_ptr<Analyzer::Expr>,
+                                             const ExtractField);
   virtual std::string to_string() const;
 
  private:
@@ -620,11 +692,14 @@ class ExtractExpr : public Expr {
 class DatetruncExpr : public Expr {
  public:
   DatetruncExpr(std::string* f, Expr* a) : field(f), from_arg(a) {}
-  virtual std::shared_ptr<Analyzer::Expr> analyze(const Catalog_Namespace::Catalog& catalog,
-                                                  Analyzer::Query& query,
-                                                  TlistRefType allow_tlist_ref = TLIST_NONE) const;
-  static std::shared_ptr<Analyzer::Expr> get(const std::shared_ptr<Analyzer::Expr>, const std::string&);
-  static std::shared_ptr<Analyzer::Expr> get(const std::shared_ptr<Analyzer::Expr>, const DatetruncField);
+  virtual std::shared_ptr<Analyzer::Expr> analyze(
+      const Catalog_Namespace::Catalog& catalog,
+      Analyzer::Query& query,
+      TlistRefType allow_tlist_ref = TLIST_NONE) const;
+  static std::shared_ptr<Analyzer::Expr> get(const std::shared_ptr<Analyzer::Expr>,
+                                             const std::string&);
+  static std::shared_ptr<Analyzer::Expr> get(const std::shared_ptr<Analyzer::Expr>,
+                                             const DatetruncField);
   virtual std::string to_string() const;
 
  private:
@@ -665,16 +740,19 @@ class Stmt : public Node {
  */
 class DMLStmt : public Stmt {
  public:
-  virtual void analyze(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const = 0;
+  virtual void analyze(const Catalog_Namespace::Catalog& catalog,
+                       Analyzer::Query& query) const = 0;
 };
 
 /*
  * @type DDLStmt
  * @brief DDL Statements
  */
+class ColumnDef;
 class DDLStmt : public Stmt {
  public:
   virtual void execute(const Catalog_Namespace::SessionInfo& session) = 0;
+  void setColumnDescriptor(ColumnDescriptor& cd, const ColumnDef* coldef);
 };
 
 /*
@@ -691,10 +769,16 @@ class TableElement : public Node {
  */
 class ColumnConstraintDef : public Node {
  public:
-  ColumnConstraintDef(bool n, bool u, bool p, Literal* d) : notnull(n), unique(u), is_primarykey(p), defaultval(d) {}
-  ColumnConstraintDef(Expr* c) : notnull(false), unique(false), is_primarykey(false), check_condition(c) {}
+  ColumnConstraintDef(bool n, bool u, bool p, Literal* d)
+      : notnull(n), unique(u), is_primarykey(p), defaultval(d) {}
+  ColumnConstraintDef(Expr* c)
+      : notnull(false), unique(false), is_primarykey(false), check_condition(c) {}
   ColumnConstraintDef(std::string* t, std::string* c)
-      : notnull(false), unique(false), is_primarykey(false), foreign_table(t), foreign_column(c) {}
+      : notnull(false)
+      , unique(false)
+      , is_primarykey(false)
+      , foreign_table(t)
+      , foreign_column(c) {}
   bool get_notnull() const { return notnull; }
   bool get_unique() const { return unique; }
   bool get_is_primarykey() const { return is_primarykey; }
@@ -739,7 +823,9 @@ class ColumnDef : public TableElement {
   const std::string* get_column_name() const { return column_name.get(); }
   SQLType* get_column_type() const { return column_type.get(); }
   const CompressDef* get_compression() const { return compression.get(); }
-  const ColumnConstraintDef* get_column_constraint() const { return column_constraint.get(); }
+  const ColumnConstraintDef* get_column_constraint() const {
+    return column_constraint.get();
+  }
 
  private:
   std::unique_ptr<std::string> column_name;
@@ -770,7 +856,9 @@ class UniqueDef : public TableConstraintDef {
     delete cl;
   }
   bool get_is_primarykey() const { return is_primarykey; }
-  const std::list<std::unique_ptr<std::string>>& get_column_list() const { return column_list; }
+  const std::list<std::unique_ptr<std::string>>& get_column_list() const {
+    return column_list;
+  }
 
  private:
   bool is_primarykey;
@@ -783,7 +871,8 @@ class UniqueDef : public TableConstraintDef {
  */
 class ForeignKeyDef : public TableConstraintDef {
  public:
-  ForeignKeyDef(std::list<std::string*>* cl, std::string* t, std::list<std::string*>* fcl) : foreign_table(t) {
+  ForeignKeyDef(std::list<std::string*>* cl, std::string* t, std::list<std::string*>* fcl)
+      : foreign_table(t) {
     CHECK(cl);
     for (const auto s : *cl) {
       column_list.emplace_back(s);
@@ -796,9 +885,13 @@ class ForeignKeyDef : public TableConstraintDef {
     }
     delete fcl;
   }
-  const std::list<std::unique_ptr<std::string>>& get_column_list() const { return column_list; }
+  const std::list<std::unique_ptr<std::string>>& get_column_list() const {
+    return column_list;
+  }
   const std::string* get_foreign_table() const { return foreign_table.get(); }
-  const std::list<std::unique_ptr<std::string>>& get_foreign_column_list() const { return foreign_column_list; }
+  const std::list<std::unique_ptr<std::string>>& get_foreign_column_list() const {
+    return foreign_column_list;
+  }
 
  private:
   std::list<std::unique_ptr<std::string>> column_list;
@@ -821,11 +914,14 @@ class CheckDef : public TableConstraintDef {
 
 /*
  * @type SharedDictionaryDef
- * @brief Shared dictionary hint. The underlying string dictionary will be shared with the referenced column.
+ * @brief Shared dictionary hint. The underlying string dictionary will be shared with the
+ * referenced column.
  */
 class SharedDictionaryDef : public TableConstraintDef {
  public:
-  SharedDictionaryDef(const std::string& column, const std::string& foreign_table, const std::string foreign_column)
+  SharedDictionaryDef(const std::string& column,
+                      const std::string& foreign_table,
+                      const std::string foreign_column)
       : column_(column), foreign_table_(foreign_table), foreign_column_(foreign_column) {}
 
   const std::string& get_column() const { return column_; }
@@ -894,17 +990,13 @@ class CreateTableStmt : public DDLStmt {
     }
   }
   const std::string* get_table() const { return table.get(); }
-  const std::list<std::unique_ptr<TableElement>>& get_table_element_list() const { return table_element_list; }
+  const std::list<std::unique_ptr<TableElement>>& get_table_element_list() const {
+    return table_element_list;
+  }
 
   virtual void execute(const Catalog_Namespace::SessionInfo& session);
 
  private:
-  // Validate shared dictionary directive against the list of columns seen so far.
-  void validate_shared_dictionary(const SharedDictionaryDef* shared_dict_def,
-                                  const std::list<ColumnDescriptor>& columns,
-                                  const std::vector<SharedDictionaryDef>& shared_dict_defs_so_far,
-                                  const Catalog_Namespace::Catalog& catalog) const;
-
   std::unique_ptr<std::string> table;
   std::list<std::unique_ptr<TableElement>> table_element_list;
   bool is_temporary_;
@@ -918,8 +1010,12 @@ class CreateTableStmt : public DDLStmt {
  */
 class CreateTableAsSelectStmt : public DDLStmt {
  public:
-  CreateTableAsSelectStmt(const std::string& table_name, const std::string& select_query, const bool is_temporary)
-      : table_name_(table_name), select_query_(select_query), is_temporary_(is_temporary) {}
+  CreateTableAsSelectStmt(const std::string& table_name,
+                          const std::string& select_query,
+                          const bool is_temporary)
+      : table_name_(table_name)
+      , select_query_(select_query)
+      , is_temporary_(is_temporary) {}
 
   virtual void execute(const Catalog_Namespace::SessionInfo& session);
 
@@ -960,7 +1056,8 @@ class TruncateTableStmt : public DDLStmt {
 
 class RenameTableStmt : public DDLStmt {
  public:
-  RenameTableStmt(std::string* tab, std::string* new_tab_name) : table(tab), new_table_name(new_tab_name) {}
+  RenameTableStmt(std::string* tab, std::string* new_tab_name)
+      : table(tab), new_table_name(new_tab_name) {}
   virtual void execute(const Catalog_Namespace::SessionInfo& session);
 
  private:
@@ -980,13 +1077,31 @@ class RenameColumnStmt : public DDLStmt {
   std::unique_ptr<std::string> new_column_name;
 };
 
+class AddColumnStmt : public DDLStmt {
+ public:
+  AddColumnStmt(std::string* tab, ColumnDef* coldef) : table(tab), coldef(coldef) {}
+  AddColumnStmt(std::string* tab, std::list<ColumnDef*>* coldefs) : table(tab) {
+    for (const auto coldef : *coldefs)
+      this->coldefs.emplace_back(coldef);
+    delete coldefs;
+  }
+  virtual void execute(const Catalog_Namespace::SessionInfo& session);
+  const std::string* get_table() const { return table.get(); }
+
+ private:
+  std::unique_ptr<std::string> table;
+  std::unique_ptr<ColumnDef> coldef;
+  std::list<std::unique_ptr<ColumnDef>> coldefs;
+};
+
 /*
  * @type CopyTableStmt
  * @brief COPY ... FROM ...
  */
 class CopyTableStmt : public DDLStmt {
  public:
-  CopyTableStmt(std::string* t, std::string* f, std::list<NameValueAssign*>* o) : table(t), file_pattern(f) {
+  CopyTableStmt(std::string* t, std::string* f, std::list<NameValueAssign*>* o)
+      : table(t), file_pattern(f) {
     if (o) {
       for (const auto e : *o) {
         options.emplace_back(e);
@@ -995,12 +1110,12 @@ class CopyTableStmt : public DDLStmt {
     }
   }
   virtual void execute(const Catalog_Namespace::SessionInfo& session);
-  void execute(
-      const Catalog_Namespace::SessionInfo& session,
-      const std::function<std::unique_ptr<Importer_NS::Importer>(const Catalog_Namespace::Catalog&,
-                                                                 const TableDescriptor*,
-                                                                 const std::string&,
-                                                                 const Importer_NS::CopyParams&)>& importer_factory);
+  void execute(const Catalog_Namespace::SessionInfo& session,
+               const std::function<std::unique_ptr<Importer_NS::Importer>(
+                   Catalog_Namespace::Catalog&,
+                   const TableDescriptor*,
+                   const std::string&,
+                   const Importer_NS::CopyParams&)>& importer_factory);
   std::unique_ptr<std::string> return_message;
 
   std::string& get_table() const {
@@ -1008,10 +1123,25 @@ class CopyTableStmt : public DDLStmt {
     return *table;
   }
 
+  bool was_geo_copy_from() const { return _was_geo_copy_from; }
+
+  void get_geo_copy_from_payload(std::string& geo_copy_from_table,
+                                 std::string& geo_copy_from_file_name,
+                                 Importer_NS::CopyParams& geo_copy_from_copy_params) {
+    geo_copy_from_table = *table;
+    geo_copy_from_file_name = _geo_copy_from_file_name;
+    geo_copy_from_copy_params = _geo_copy_from_copy_params;
+    _was_geo_copy_from = false;
+  }
+
  private:
   std::unique_ptr<std::string> table;
   std::unique_ptr<std::string> file_pattern;
   std::list<std::unique_ptr<NameValueAssign>> options;
+
+  bool _was_geo_copy_from = false;
+  std::string _geo_copy_from_file_name;
+  Importer_NS::CopyParams _geo_copy_from_copy_params;
 };
 
 /*
@@ -1048,7 +1178,10 @@ class DropRoleStmt : public DDLStmt {
  */
 class GrantPrivilegesStmt : public DDLStmt {
  public:
-  GrantPrivilegesStmt(const std::string& p, const std::string& t, const std::string& o, const std::string& r)
+  GrantPrivilegesStmt(const std::string& p,
+                      const std::string& t,
+                      const std::string& o,
+                      const std::string& r)
       : priv(p), object_type(t), object(o), role(r) {}
   const std::string& get_priv() const { return priv; }
   const std::string& get_object_type() const { return object_type; }
@@ -1069,7 +1202,10 @@ class GrantPrivilegesStmt : public DDLStmt {
  */
 class RevokePrivilegesStmt : public DDLStmt {
  public:
-  RevokePrivilegesStmt(const std::string& p, const std::string& t, const std::string& o, const std::string& r)
+  RevokePrivilegesStmt(const std::string& p,
+                       const std::string& t,
+                       const std::string& o,
+                       const std::string& r)
       : priv(p), object_type(t), object(o), role(r) {}
   const std::string& get_priv() const { return priv; }
   const std::string& get_object_type() const { return object_type; }
@@ -1141,7 +1277,8 @@ class RevokeRoleStmt : public DDLStmt {
  */
 class QueryExpr : public Node {
  public:
-  virtual void analyze(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const = 0;
+  virtual void analyze(const Catalog_Namespace::Catalog& catalog,
+                       Analyzer::Query& query) const = 0;
 };
 
 /*
@@ -1154,7 +1291,8 @@ class UnionQuery : public QueryExpr {
   bool get_is_unionall() const { return is_unionall; }
   const QueryExpr* get_left() const { return left.get(); }
   const QueryExpr* get_right() const { return right.get(); }
-  virtual void analyze(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const;
+  virtual void analyze(const Catalog_Namespace::Catalog& catalog,
+                       Analyzer::Query& query) const;
 
  private:
   bool is_unionall;
@@ -1180,7 +1318,12 @@ class SelectEntry : public Node {
  */
 class QuerySpec : public QueryExpr {
  public:
-  QuerySpec(bool d, std::list<SelectEntry*>* s, std::list<TableRef*>* f, Expr* w, std::list<Expr*>* g, Expr* h)
+  QuerySpec(bool d,
+            std::list<SelectEntry*>* s,
+            std::list<TableRef*>* f,
+            Expr* w,
+            std::list<Expr*>* g,
+            Expr* h)
       : is_distinct(d), where_clause(w), having_clause(h) {
     if (s) {
       for (const auto e : *s) {
@@ -1201,12 +1344,19 @@ class QuerySpec : public QueryExpr {
     }
   }
   bool get_is_distinct() const { return is_distinct; }
-  const std::list<std::unique_ptr<SelectEntry>>& get_select_clause() const { return select_clause; }
-  const std::list<std::unique_ptr<TableRef>>& get_from_clause() const { return from_clause; }
+  const std::list<std::unique_ptr<SelectEntry>>& get_select_clause() const {
+    return select_clause;
+  }
+  const std::list<std::unique_ptr<TableRef>>& get_from_clause() const {
+    return from_clause;
+  }
   const Expr* get_where_clause() const { return where_clause.get(); }
-  const std::list<std::unique_ptr<Expr>>& get_groupby_clause() const { return groupby_clause; }
+  const std::list<std::unique_ptr<Expr>>& get_groupby_clause() const {
+    return groupby_clause;
+  }
   const Expr* get_having_clause() const { return having_clause.get(); }
-  virtual void analyze(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const;
+  virtual void analyze(const Catalog_Namespace::Catalog& catalog,
+                       Analyzer::Query& query) const;
   std::string to_string() const;
 
  private:
@@ -1216,11 +1366,16 @@ class QuerySpec : public QueryExpr {
   std::unique_ptr<Expr> where_clause;
   std::list<std::unique_ptr<Expr>> groupby_clause;
   std::unique_ptr<Expr> having_clause;
-  void analyze_from_clause(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const;
-  void analyze_select_clause(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const;
-  void analyze_where_clause(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const;
-  void analyze_group_by(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const;
-  void analyze_having_clause(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const;
+  void analyze_from_clause(const Catalog_Namespace::Catalog& catalog,
+                           Analyzer::Query& query) const;
+  void analyze_select_clause(const Catalog_Namespace::Catalog& catalog,
+                             Analyzer::Query& query) const;
+  void analyze_where_clause(const Catalog_Namespace::Catalog& catalog,
+                            Analyzer::Query& query) const;
+  void analyze_group_by(const Catalog_Namespace::Catalog& catalog,
+                        Analyzer::Query& query) const;
+  void analyze_having_clause(const Catalog_Namespace::Catalog& catalog,
+                             Analyzer::Query& query) const;
 };
 
 /*
@@ -1229,7 +1384,8 @@ class QuerySpec : public QueryExpr {
  */
 class OrderSpec : public Node {
  public:
-  OrderSpec(int n, ColumnRef* c, bool d, bool f) : colno(n), column(c), is_desc(d), nulls_first(f) {}
+  OrderSpec(int n, ColumnRef* c, bool d, bool f)
+      : colno(n), column(c), is_desc(d), nulls_first(f) {}
   int get_colno() const { return colno; }
   const ColumnRef* get_column() const { return column.get(); }
   bool get_is_desc() const { return is_desc; }
@@ -1248,7 +1404,8 @@ class OrderSpec : public Node {
  */
 class SelectStmt : public DMLStmt {
  public:
-  SelectStmt(QueryExpr* q, std::list<OrderSpec*>* o, int64_t l, int64_t f) : query_expr(q), limit(l), offset(f) {
+  SelectStmt(QueryExpr* q, std::list<OrderSpec*>* o, int64_t l, int64_t f)
+      : query_expr(q), limit(l), offset(f) {
     if (o) {
       for (const auto e : *o) {
         orderby_clause.emplace_back(e);
@@ -1257,8 +1414,11 @@ class SelectStmt : public DMLStmt {
     }
   }
   const QueryExpr* get_query_expr() const { return query_expr.get(); }
-  const std::list<std::unique_ptr<OrderSpec>>& get_orderby_clause() const { return orderby_clause; }
-  virtual void analyze(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const;
+  const std::list<std::unique_ptr<OrderSpec>>& get_orderby_clause() const {
+    return orderby_clause;
+  }
+  virtual void analyze(const Catalog_Namespace::Catalog& catalog,
+                       Analyzer::Query& query) const;
 
  private:
   std::unique_ptr<QueryExpr> query_expr;
@@ -1301,7 +1461,8 @@ class ShowCreateTableStmt : public DDLStmt {
  */
 class ExportQueryStmt : public DDLStmt {
  public:
-  ExportQueryStmt(std::string* q, std::string* p, std::list<NameValueAssign*>* o) : select_stmt(q), file_path(p) {
+  ExportQueryStmt(std::string* q, std::string* p, std::list<NameValueAssign*>* o)
+      : select_stmt(q), file_path(p) {
     if (o) {
       for (const auto e : *o) {
         options.emplace_back(e);
@@ -1310,6 +1471,7 @@ class ExportQueryStmt : public DDLStmt {
     }
   }
   virtual void execute(const Catalog_Namespace::SessionInfo& session);
+  const std::string get_select_stmt() const { return *select_stmt; }
 
  private:
   std::unique_ptr<std::string> select_stmt;
@@ -1323,8 +1485,12 @@ class ExportQueryStmt : public DDLStmt {
  */
 class CreateViewStmt : public DDLStmt {
  public:
-  CreateViewStmt(const std::string& view_name, const std::string& select_query, const bool if_not_exists)
-      : view_name_(view_name), select_query_(select_query), if_not_exists_(if_not_exists) {}
+  CreateViewStmt(const std::string& view_name,
+                 const std::string& select_query,
+                 const bool if_not_exists)
+      : view_name_(view_name)
+      , select_query_(select_query)
+      , if_not_exists_(if_not_exists) {}
   const std::string& get_view_name() const { return view_name_; }
   const std::string& get_select_query() const { return select_query_; }
   virtual void execute(const Catalog_Namespace::SessionInfo& session);
@@ -1454,8 +1620,11 @@ class InsertStmt : public DMLStmt {
     }
   }
   const std::string* get_table() const { return table.get(); }
-  const std::list<std::unique_ptr<std::string>>& get_column_list() const { return column_list; }
-  virtual void analyze(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const = 0;
+  const std::list<std::unique_ptr<std::string>>& get_column_list() const {
+    return column_list;
+  }
+  virtual void analyze(const Catalog_Namespace::Catalog& catalog,
+                       Analyzer::Query& query) const = 0;
 
  private:
   std::unique_ptr<std::string> table;
@@ -1468,7 +1637,8 @@ class InsertStmt : public DMLStmt {
  */
 class InsertValuesStmt : public InsertStmt {
  public:
-  InsertValuesStmt(std::string* t, std::list<std::string*>* c, std::list<Expr*>* v) : InsertStmt(t, c) {
+  InsertValuesStmt(std::string* t, std::list<std::string*>* c, std::list<Expr*>* v)
+      : InsertStmt(t, c) {
     CHECK(v);
     for (const auto e : *v) {
       value_list.emplace_back(e);
@@ -1476,7 +1646,8 @@ class InsertValuesStmt : public InsertStmt {
     delete v;
   }
   const std::list<std::unique_ptr<Expr>>& get_value_list() const { return value_list; }
-  virtual void analyze(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const;
+  virtual void analyze(const Catalog_Namespace::Catalog& catalog,
+                       Analyzer::Query& query) const;
 
  private:
   std::list<std::unique_ptr<Expr>> value_list;
@@ -1488,9 +1659,11 @@ class InsertValuesStmt : public InsertStmt {
  */
 class InsertQueryStmt : public InsertStmt {
  public:
-  InsertQueryStmt(std::string* t, std::list<std::string*>* c, QuerySpec* q) : InsertStmt(t, c), query(q) {}
+  InsertQueryStmt(std::string* t, std::list<std::string*>* c, QuerySpec* q)
+      : InsertStmt(t, c), query(q) {}
   const QuerySpec* get_query() const { return query.get(); }
-  virtual void analyze(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const;
+  virtual void analyze(const Catalog_Namespace::Catalog& catalog,
+                       Analyzer::Query& query) const;
 
  private:
   std::unique_ptr<QuerySpec> query;
@@ -1517,7 +1690,8 @@ class Assignment : public Node {
  */
 class UpdateStmt : public DMLStmt {
  public:
-  UpdateStmt(std::string* t, std::list<Assignment*>* a, Expr* w) : table(t), where_clause(w) {
+  UpdateStmt(std::string* t, std::list<Assignment*>* a, Expr* w)
+      : table(t), where_clause(w) {
     CHECK(a);
     for (const auto e : *a) {
       assignment_list.emplace_back(e);
@@ -1525,9 +1699,12 @@ class UpdateStmt : public DMLStmt {
     delete a;
   }
   const std::string* get_table() const { return table.get(); }
-  const std::list<std::unique_ptr<Assignment>>& get_assignment_list() const { return assignment_list; }
+  const std::list<std::unique_ptr<Assignment>>& get_assignment_list() const {
+    return assignment_list;
+  }
   const Expr* get_where_clause() const { return where_clause.get(); }
-  virtual void analyze(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const;
+  virtual void analyze(const Catalog_Namespace::Catalog& catalog,
+                       Analyzer::Query& query) const;
 
  private:
   std::unique_ptr<std::string> table;
@@ -1544,11 +1721,12 @@ class DeleteStmt : public DMLStmt {
   DeleteStmt(std::string* t, Expr* w) : table(t), where_clause(w) {}
   const std::string* get_table() const { return table.get(); }
   const Expr* get_where_clause() const { return where_clause.get(); }
-  virtual void analyze(const Catalog_Namespace::Catalog& catalog, Analyzer::Query& query) const;
+  virtual void analyze(const Catalog_Namespace::Catalog& catalog,
+                       Analyzer::Query& query) const;
 
  private:
   std::unique_ptr<std::string> table;
   std::unique_ptr<Expr> where_clause;
 };
-}
+}  // namespace Parser
 #endif  // PARSERNODE_H_

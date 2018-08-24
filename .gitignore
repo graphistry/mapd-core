@@ -28,15 +28,23 @@ cmake_install.cmake
 install_manifest.txt
 _build/
 build/
+build_debug/
+build_release/
+build3.6/
+!docker/build/
 
 # Eclipse build files
 Debug/
 .settings/
 
+# VS code settings files
+.vscode/
+
 # Thrift-generated files
 java/src/gen/
 gen-js/
 java/target/
+java/**/mapd_log/
 
 # go files
 ThirdParty/go/bin/
@@ -53,3 +61,5 @@ docs/generated-docs/
 # java-generated files
 java/**/target/
 java/thrift/src/
+*.classpath
+*.project

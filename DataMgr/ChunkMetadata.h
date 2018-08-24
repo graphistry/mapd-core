@@ -17,8 +17,8 @@
 #ifndef CHUNKMETADATA_H
 #define CHUNKMETADATA_H
 
-#include "../Shared/sqltypes.h"
 #include <stddef.h>
+#include "../Shared/sqltypes.h"
 
 struct ChunkStats {
   Datum min;
@@ -37,6 +37,11 @@ struct ChunkMetadata {
     chunkStats.has_nulls = has_nulls;
     switch (sqlType.get_type()) {
       case kBOOLEAN: {
+        chunkStats.min.tinyintval = min;
+        chunkStats.max.tinyintval = max;
+        break;
+      }
+      case kTINYINT: {
         chunkStats.min.tinyintval = min;
         chunkStats.max.tinyintval = max;
         break;

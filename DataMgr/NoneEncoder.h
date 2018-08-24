@@ -22,22 +22,31 @@
 
 template <typename T>
 T none_encoded_null_value() {
-  return std::is_integral<T>::value ? inline_int_null_value<T>() : inline_fp_null_value<T>();
+  return std::is_integral<T>::value ? inline_int_null_value<T>()
+                                    : inline_fp_null_value<T>();
 }
 
 template <typename T>
 class NoneEncoder : public Encoder {
  public:
   NoneEncoder(Data_Namespace::AbstractBuffer* buffer)
-      : Encoder(buffer),
-        dataMin(std::numeric_limits<T>::max()),
-        dataMax(std::numeric_limits<T>::min()),
-        has_nulls(false) {}
+      : Encoder(buffer)
+      , dataMin(std::numeric_limits<T>::max())
+      , dataMax(std::numeric_limits<T>::lowest())
+      , has_nulls(false) {}
 
-  ChunkMetadata appendData(int8_t*& srcData, const size_t numAppendElems) {
+  ChunkMetadata appendData(int8_t*& srcData,
+                           const size_t numAppendElems,
+                           const bool replicating = false) {
     T* unencodedData = reinterpret_cast<T*>(srcData);
+    std::unique_ptr<T> encodedData;
+    if (replicating)
+      encodedData.reset(new T[numAppendElems]);
     for (size_t i = 0; i < numAppendElems; ++i) {
-      T data = unencodedData[i];
+      size_t ri = replicating ? 0 : i;
+      T data = unencodedData[ri];
+      if (replicating)
+        encodedData.get()[i] = data;
       if (data == none_encoded_null_value<T>())
         has_nulls = true;
       else {
@@ -46,10 +55,12 @@ class NoneEncoder : public Encoder {
       }
     }
     numElems += numAppendElems;
-    buffer_->append(srcData, numAppendElems * sizeof(T));
+    buffer_->append(replicating ? (int8_t*)encodedData.get() : srcData,
+                    numAppendElems * sizeof(T));
     ChunkMetadata chunkMetadata;
     getMetadata(chunkMetadata);
-    srcData += numAppendElems * sizeof(T);
+    if (!replicating)
+      srcData += numAppendElems * sizeof(T);
     return chunkMetadata;
   }
 

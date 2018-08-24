@@ -24,12 +24,17 @@
 #ifndef PARSER_WRAPPER_H_
 #define PARSER_WRAPPER_H_
 
+#include <boost/regex.hpp>
 #include <string>
 #include <vector>
-#include <boost/regex.hpp>
+
+#include "Shared/ConfigResolve.h"
 
 class ParserWrapper {
  public:
+  // HACK:  This needs to go away as calcite takes over parsing
+  enum class DMLType : int { Insert = 0, Delete, Update, Upsert, NotDML };
+
   ParserWrapper(std::string query_string);
   std::string process(std::string user,
                       std::string passwd,
@@ -46,11 +51,55 @@ class ParserWrapper {
   bool is_copy_to = false;
   std::string actual_query;
 
+  DMLType getDMLType() const { return dml_type; }
+
  private:
+  DMLType dml_type = DMLType::NotDML;
+
   static const std::vector<std::string> ddl_cmd;
   static const std::vector<std::string> update_dml_cmd;
   static const std::string explain_str;
   static const std::string calcite_explain_str;
 };
+
+enum class CalciteDMLPathSelection : int {
+  Unsupported = 0,
+  OnlyUpdates = 1,
+  OnlyDeletes = 2,
+  UpdatesAndDeletes = 3,
+};
+
+inline CalciteDMLPathSelection yield_dml_path_selector() {
+  int selector = 0;
+  if (std::is_same<CalciteDeletePathSelector, PreprocessorTrue>::value)
+    selector |= 0x02;
+  if (std::is_same<CalciteUpdatePathSelector, PreprocessorTrue>::value)
+    selector |= 0x01;
+  return static_cast<CalciteDMLPathSelection>(selector);
+}
+
+inline bool is_calcite_permissable_dml(ParserWrapper const& pw, bool read_only_mode) {
+  if (read_only_mode)
+    return !pw.is_update_dml;  // If we're read-only rejected, no DML is permissable
+
+  switch (yield_dml_path_selector()) {
+    case CalciteDMLPathSelection::OnlyUpdates:
+      return !pw.is_update_dml || (pw.getDMLType() == ParserWrapper::DMLType::Update);
+    case CalciteDMLPathSelection::OnlyDeletes:
+      return !pw.is_update_dml || (pw.getDMLType() == ParserWrapper::DMLType::Delete);
+    case CalciteDMLPathSelection::UpdatesAndDeletes:
+      return !pw.is_update_dml || (pw.getDMLType() == ParserWrapper::DMLType::Delete) ||
+             (pw.getDMLType() == ParserWrapper::DMLType::Update);
+    case CalciteDMLPathSelection::Unsupported:
+    default:
+      return false;
+  }
+}
+
+inline bool is_calcite_path_permissable(ParserWrapper const& pw,
+                                        bool read_only_mode = false) {
+  return (!pw.is_ddl && is_calcite_permissable_dml(pw, read_only_mode) &&
+          !pw.is_other_explain);
+}
 
 #endif  // PARSERWRAPPER_H_

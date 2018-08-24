@@ -26,6 +26,7 @@
 
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 // The ChunkKey is a unique identifier for chunks in the database file.
@@ -41,14 +42,22 @@ inline std::string showChunk(const ChunkKey& key) {
   return tss.str();
 }
 
-typedef std::vector<int32_t> DBObjectKey;
+#ifndef NO_OOM_TRACE
+void oom_trace_push(const std::string&);
+void oom_trace_pop();
+void oom_trace_dump();
 
-inline std::string showDBObjectKey(const DBObjectKey& key) {
-  std::ostringstream tss;
-  for (auto vecIt = key.begin(); vecIt != key.end(); ++vecIt) {
-    tss << *vecIt << ",";
-  }
-  return tss.str();
-}
+struct OomStub {
+  ~OomStub() { oom_trace_pop(); }
+};
+
+#define OOM_TRACE_PUSH(...)     \
+  OomStub oomStub##__COUNTER__; \
+  oom_trace_push(std::string(__func__) + ":" + std::to_string(__LINE__) + " " __VA_ARGS__)
+#define OOM_TRACE_DUMP oom_trace_dump()
+#else
+#define OOM_TRACE_PUSH(...)
+#define OOM_TRACE_DUMP
+#endif  // OOM_TRACE
 
 #endif /* _TYPES_H */

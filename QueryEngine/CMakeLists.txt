@@ -7,6 +7,8 @@ set(query_engine_source_files
     ArithmeticIR.cpp
     ArrayIR.cpp
     ArrayOps.cpp
+    ArrowResultSet.cpp
+    ArrowUtil.cpp
     BaselineJoinHashTable.cpp
     CalciteAdapter.cpp
     CalciteDeserializerUtils.cpp
@@ -21,6 +23,7 @@ set(query_engine_source_files
     DateTimePlusRewrite.cpp
     EquiJoinCondition.cpp
     Execute.cpp
+    ExecuteUpdate.cpp
     ExecutionDispatch.cpp
     ExpressionRange.cpp
     ExpressionRewrite.cpp
@@ -38,8 +41,8 @@ set(query_engine_source_files
     InputMetadata.cpp
     IteratorTable.cpp
     LegacyExecute.cpp
-    LikeIR.cpp
     LogicalIR.cpp
+    LLVMFunctionAttributesUtil.cpp
     LLVMGlobalContext.cpp
     MaxwellCodegenPatch.cpp
     MurmurHash.cpp
@@ -49,32 +52,51 @@ set(query_engine_source_files
     QueryPhysicalInputsCollector.cpp
     QueryRewrite.cpp
     QueryTemplateGenerator.cpp
+    QueryFragmentDescriptor.cpp
+    QueryMemoryDescriptor.cpp
     RelAlgAbstractInterpreter.cpp
+    RelLeftDeepInnerJoin.cpp
     RelAlgExecutionDescriptor.cpp
     RelAlgExecutor.cpp
     RelAlgTranslator.cpp
+    RelAlgTranslatorGeo.cpp
     RelAlgOptimizer.cpp
-    RenderInterface.cpp
     ResultRows.cpp
     ResultSet.cpp
     ResultSetIteration.cpp
     ResultSetReduction.cpp
     ResultSetConversion.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/LoopControlFlow/JoinLoop.cpp
     ResultSetSort.cpp
     RuntimeFunctions.cpp
     RuntimeFunctions.bc
     DynamicWatchdog.cpp
     SpeculativeTopN.cpp
+    StreamingTopN.cpp
     StringDictionaryGenerations.cpp
     TableGenerations.cpp
     StringFunctions.cpp
+    StringOpsIR.cpp
     RegexpFunctions.cpp
     JoinHashTable.cpp
     HashJoinRuntime.cpp
+    
     Codec.h
     Execute.h
     NvidiaKernel.h
     QueryTemplateGenerator.h)
+
+if(NOT "${MAPD_EDITION_LOWER}" STREQUAL "os")
+  list(APPEND query_engine_source_files
+    ${CMAKE_CURRENT_SOURCE_DIR}/Rendering/ee/ExecuteRenderInterface.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Rendering/ee/RenderAllocator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Rendering/ee/RenderInfo.cpp)
+else()
+  list(APPEND query_engine_source_files
+    ${CMAKE_CURRENT_SOURCE_DIR}/Rendering/os/ExecuteRenderInterface.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Rendering/os/RenderAllocator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Rendering/os/RenderInfo.cpp)
+endif()
 
 set(group_by_hash_test_files
     GroupByHashTest.cpp
@@ -88,6 +110,13 @@ execute_process(COMMAND ${llvm_config_cmd} "--includedir"
 
 if(ENABLE_CUDA)
   set(MAPD_DEFINITIONS "-DHAVE_CUDA")
+  set(NVCC_BUILD_TYPE_ARGS)
+  string(TOUPPER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE_UPPERCASE)
+  if(CMAKE_BUILD_TYPE_UPPERCASE MATCHES DEBUG)
+    list(APPEND NVCC_BUILD_TYPE_ARGS -DTHRUST_DEBUG -g)
+  else()
+    list(APPEND NVCC_BUILD_TYPE_ARGS -O3)
+  endif()
 endif()
 
 if(ENABLE_MULTIFRAG_JOIN)
@@ -115,7 +144,7 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 
 add_custom_command(
-    DEPENDS RuntimeFunctions.cpp RuntimeFunctions.h ${CMAKE_SOURCE_DIR}/Utils/StringLike.cpp GroupByRuntime.cpp
+    DEPENDS RuntimeFunctions.cpp RuntimeFunctions.h ${CMAKE_SOURCE_DIR}/Utils/StringLike.cpp GroupByRuntime.cpp TopKRuntime.cpp
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/RuntimeFunctions.bc
     COMMAND ${llvm_clangpp_cmd}
     ARGS -std=c++11 -O3 -c -emit-llvm
@@ -125,7 +154,7 @@ add_custom_command(
     ${CMAKE_CURRENT_SOURCE_DIR}/RuntimeFunctions.cpp)
 
 add_custom_command(
-    DEPENDS ExtensionFunctions.hpp
+    DEPENDS ExtensionFunctions.hpp ExtensionFunctionsGeo.hpp
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ExtensionFunctions.ast
     COMMAND ${llvm_clangpp_cmd}
     ARGS -std=c++11 -fsyntax-only -Xclang -ast-dump -fno-diagnostics-color
@@ -135,21 +164,18 @@ add_custom_command(
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/RuntimeFunctions.bc ${CMAKE_CURRENT_BINARY_DIR}/ExtensionFunctions.ast DESTINATION QueryEngine)
 
 if(ENABLE_CUDA)
-  add_library(QueryEngine ${query_engine_source_files} ${CMAKE_CURRENT_BINARY_DIR}/cuda_mapd_rt.a ${CMAKE_CURRENT_BINARY_DIR}/InPlaceSortImpl.o ${CMAKE_CURRENT_BINARY_DIR}/ResultSetSortImpl.o ${CMAKE_CURRENT_BINARY_DIR}/GpuInitGroups.o ${CMAKE_CURRENT_BINARY_DIR}/HashJoinRuntimeGpu.o)
+  if (ENABLE_RENDERING)
+    add_library(QueryEngine ${query_engine_source_files} ${CMAKE_CURRENT_BINARY_DIR}/cuda_mapd_rt.a ${CMAKE_CURRENT_BINARY_DIR}/TopKSort.o ${CMAKE_CURRENT_BINARY_DIR}/InPlaceSortImpl.o ${CMAKE_CURRENT_BINARY_DIR}/ResultSetSortImpl.o ${CMAKE_CURRENT_BINARY_DIR}/GpuInitGroups.o ${CMAKE_CURRENT_BINARY_DIR}/HashJoinRuntimeGpu.o ${CMAKE_CURRENT_BINARY_DIR}/ThrustPolygons.o)
+  else()
+    add_library(QueryEngine ${query_engine_source_files} ${CMAKE_CURRENT_BINARY_DIR}/cuda_mapd_rt.a ${CMAKE_CURRENT_BINARY_DIR}/TopKSort.o ${CMAKE_CURRENT_BINARY_DIR}/InPlaceSortImpl.o ${CMAKE_CURRENT_BINARY_DIR}/ResultSetSortImpl.o ${CMAKE_CURRENT_BINARY_DIR}/GpuInitGroups.o ${CMAKE_CURRENT_BINARY_DIR}/HashJoinRuntimeGpu.o)
+  endif()
 else()
   add_library(QueryEngine ${query_engine_source_files})
 endif()
 
-if(ENABLE_ARROW_CONVERTER)
-  set(ARROW_LIBS ${Arrow_LIBRARIES})
-endif()
+set(ARROW_LIBS ${Arrow_LIBRARIES})
 
-if(ENABLE_RENDERING)
-  target_link_libraries(QueryEngine CsvImport Planner StringDictionary Utils QueryRenderer ${ARROW_LIBS})
-else()
-  target_link_libraries(QueryEngine CsvImport Planner StringDictionary Utils  ${ARROW_LIBS})
-endif()
-
+target_link_libraries(QueryEngine Planner StringDictionary Utils ${ARROW_LIBS})
 
 add_custom_command(
     DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/cuda_mapd_rt.o
@@ -164,11 +190,12 @@ add_custom_command(
         ${MAPD_DEFINITIONS}
         -arch sm_30
         -lib ${CMAKE_CURRENT_BINARY_DIR}/cuda_mapd_rt.o
+        ${NVCC_BUILD_TYPE_ARGS}
         -o ${CMAKE_CURRENT_BINARY_DIR}/cuda_mapd_rt.a
     )
 
 add_custom_command(
-    DEPENDS cuda_mapd_rt.cu GpuInitGroups.cu GroupByRuntime.cpp DateTruncate.cpp DateAdd.cpp ExtractFromTime.cpp ArrayOps.cpp StringFunctions.cpp RegexpFunctions.cpp ${CMAKE_SOURCE_DIR}/Utils/ChunkIter.cpp ${CMAKE_SOURCE_DIR}/Utils/StringLike.cpp ${CMAKE_SOURCE_DIR}/Utils/Regexp.cpp ${CMAKE_CURRENT_SOURCE_DIR}/ExtensionFunctions.hpp
+    DEPENDS cuda_mapd_rt.cu GpuInitGroups.cu GroupByRuntime.cpp TopKRuntime.cpp DateTruncate.cpp DateAdd.cpp ExtractFromTime.cpp ArrayOps.cpp StringFunctions.cpp RegexpFunctions.cpp ${CMAKE_SOURCE_DIR}/Utils/ChunkIter.cpp ${CMAKE_SOURCE_DIR}/Utils/StringLike.cpp ${CMAKE_SOURCE_DIR}/Utils/Regexp.cpp ${CMAKE_CURRENT_SOURCE_DIR}/ExtensionFunctions.hpp ${CMAKE_CURRENT_SOURCE_DIR}/ExtensionFunctionsGeo.hpp
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/cuda_mapd_rt.o
     COMMAND nvcc
     ARGS
@@ -181,7 +208,23 @@ add_custom_command(
         --device-link
         -arch sm_30
         -std=c++11
+        ${NVCC_BUILD_TYPE_ARGS}
         -c ${CMAKE_CURRENT_SOURCE_DIR}/cuda_mapd_rt.cu
+    )
+
+add_custom_command(
+    DEPENDS TopKSort.cu
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/TopKSort.o
+    COMMAND nvcc
+    ARGS
+        ${MAPD_HOST_COMPILER_FLAG}
+        -Xcompiler -fPIC
+        -std=c++11
+        -D_FORCE_INLINES
+        ${MAPD_DEFINITIONS}
+        -arch sm_30
+        ${NVCC_BUILD_TYPE_ARGS}
+        -c ${CMAKE_CURRENT_SOURCE_DIR}/TopKSort.cu
     )
 
 add_custom_command(
@@ -191,11 +234,11 @@ add_custom_command(
     ARGS
         ${MAPD_HOST_COMPILER_FLAG}
         -Xcompiler -fPIC
-        -O3
         -D_FORCE_INLINES
         ${MAPD_DEFINITIONS}
         -arch sm_30
         -std=c++11
+        ${NVCC_BUILD_TYPE_ARGS}
         -c ${CMAKE_CURRENT_SOURCE_DIR}/InPlaceSortImpl.cu
     )
 
@@ -207,10 +250,10 @@ add_custom_command(
         ${MAPD_HOST_COMPILER_FLAG}
         -Xcompiler -fPIC
         -std=c++11
-        -O3
         -D_FORCE_INLINES
         ${MAPD_DEFINITIONS}
         -arch sm_30
+        ${NVCC_BUILD_TYPE_ARGS}
         -c ${CMAKE_CURRENT_SOURCE_DIR}/ResultSetSortImpl.cu
     )
 
@@ -223,9 +266,9 @@ add_custom_command(
         -Xcompiler -fPIC
         -D_FORCE_INLINES
         ${MAPD_DEFINITIONS}
-        -O3
         -arch sm_30
         -std=c++11
+        ${NVCC_BUILD_TYPE_ARGS}
         -c ${CMAKE_CURRENT_SOURCE_DIR}/GpuInitGroups.cu
     )
 
@@ -238,10 +281,28 @@ add_custom_command(
         -Xcompiler -fPIC
         -D_FORCE_INLINES
         ${MAPD_DEFINITIONS}
-        -O3
         -arch sm_30
         -std=c++11
+        ${NVCC_BUILD_TYPE_ARGS}
         -c ${CMAKE_CURRENT_SOURCE_DIR}/HashJoinRuntimeGpu.cu
+    )
+
+add_custom_command(
+    DEPENDS Rendering/ee/ThrustPolygons.cu
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ThrustPolygons.o
+    COMMAND nvcc
+    ARGS
+        -I ${CMAKE_SOURCE_DIR}
+        -I ${glbinding_INCLUDE_DIR}
+        ${MAPD_HOST_COMPILER_FLAG}
+        -Xcompiler -fPIC
+        -D_FORCE_INLINES
+        ${MAPD_DEFINITIONS}
+        -arch sm_30
+        -std=c++11
+        -Xcudafe "--diag_suppress=virtual_function_decl_hidden"
+        ${NVCC_BUILD_TYPE_ARGS}
+        -c ${CMAKE_CURRENT_SOURCE_DIR}/Rendering/ee/ThrustPolygons.cu
     )
 
 add_executable(group_by_hash_test ${group_by_hash_test_files})

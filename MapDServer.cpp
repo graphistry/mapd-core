@@ -17,28 +17,30 @@
 #include "MapDServer.h"
 #include "ThriftHandler/MapDHandler.h"
 
-#include <thrift/concurrency/ThreadManager.h>
 #include <thrift/concurrency/PlatformThreadFactory.h>
+#include <thrift/concurrency/ThreadManager.h>
 #include <thrift/protocol/TBinaryProtocol.h>
 #include <thrift/protocol/TJSONProtocol.h>
-#include <thrift/server/TThreadPoolServer.h>
 #include <thrift/server/TThreadedServer.h>
+#include <thrift/transport/TBufferTransports.h>
 #include <thrift/transport/THttpServer.h>
 #include <thrift/transport/TServerSocket.h>
-#include <thrift/transport/TBufferTransports.h>
 
 #include "MapDRelease.h"
 
 #include "Shared/MapDParameters.h"
+#include "Shared/mapd_shared_ptr.h"
+#include "Shared/measure.h"
 #include "Shared/scope.h"
 
+#include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/make_shared.hpp>
 #include <boost/program_options.hpp>
-#include <thread>
-#include <glog/logging.h>
-#include <signal.h>
+#include <csignal>
 #include <sstream>
+#include <thread>
+#include <vector>
 
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::concurrency;
@@ -46,89 +48,64 @@ using namespace ::apache::thrift::protocol;
 using namespace ::apache::thrift::server;
 using namespace ::apache::thrift::transport;
 
-using boost::make_shared;
-using boost::shared_ptr;
-
 extern bool g_aggregator;
 extern size_t g_leaf_count;
 
-AggregatedColRange column_ranges_from_thrift(const std::vector<TColumnRange>& thrift_column_ranges) {
-  AggregatedColRange column_ranges;
-  for (const auto& thrift_column_range : thrift_column_ranges) {
-    PhysicalInput phys_input{thrift_column_range.col_id, thrift_column_range.table_id};
-    switch (thrift_column_range.type) {
-      case TExpressionRangeType::INTEGER:
-        column_ranges.setColRange(phys_input,
-                                  ExpressionRange::makeIntRange(thrift_column_range.int_min,
-                                                                thrift_column_range.int_max,
-                                                                thrift_column_range.bucket,
-                                                                thrift_column_range.has_nulls));
-        break;
-      case TExpressionRangeType::FLOAT:
-        column_ranges.setColRange(
-            phys_input,
-            ExpressionRange::makeFloatRange(
-                thrift_column_range.fp_min, thrift_column_range.fp_max, thrift_column_range.has_nulls));
-        break;
-      case TExpressionRangeType::DOUBLE:
-        column_ranges.setColRange(
-            phys_input,
-            ExpressionRange::makeDoubleRange(
-                thrift_column_range.fp_min, thrift_column_range.fp_max, thrift_column_range.has_nulls));
-        break;
-      case TExpressionRangeType::INVALID:
-        column_ranges.setColRange(phys_input, ExpressionRange::makeInvalidRange());
-        break;
-      default:
-        CHECK(false);
-    }
-  }
-  return column_ranges;
-}
-
-StringDictionaryGenerations string_dictionary_generations_from_thrift(
-    const std::vector<TDictionaryGeneration>& thrift_string_dictionary_generations) {
-  StringDictionaryGenerations string_dictionary_generations;
-  for (const auto& thrift_string_dictionary_generation : thrift_string_dictionary_generations) {
-    string_dictionary_generations.setGeneration(thrift_string_dictionary_generation.dict_id,
-                                                thrift_string_dictionary_generation.entry_count);
-  }
-  return string_dictionary_generations;
-}
-
-TableGenerations table_generations_from_thrift(const std::vector<TTableGeneration>& thrift_table_generations) {
+TableGenerations table_generations_from_thrift(
+    const std::vector<TTableGeneration>& thrift_table_generations) {
   TableGenerations table_generations;
   for (const auto& thrift_table_generation : thrift_table_generations) {
-    table_generations.setGeneration(thrift_table_generation.table_id,
-                                    TableGeneration{static_cast<size_t>(thrift_table_generation.tuple_count),
-                                                    static_cast<size_t>(thrift_table_generation.start_rowid)});
+    table_generations.setGeneration(
+        thrift_table_generation.table_id,
+        TableGeneration{static_cast<size_t>(thrift_table_generation.tuple_count),
+                        static_cast<size_t>(thrift_table_generation.start_rowid)});
   }
   return table_generations;
 }
 
 std::vector<LeafHostInfo> only_db_leaves(const std::vector<LeafHostInfo>& all_leaves) {
   std::vector<LeafHostInfo> data_leaves;
-  std::copy_if(all_leaves.begin(), all_leaves.end(), std::back_inserter(data_leaves), [](const LeafHostInfo& leaf) {
-    return leaf.getRole() == NodeRole::DbLeaf;
-  });
+  std::copy_if(
+      all_leaves.begin(),
+      all_leaves.end(),
+      std::back_inserter(data_leaves),
+      [](const LeafHostInfo& leaf) { return leaf.getRole() == NodeRole::DbLeaf; });
   return data_leaves;
 }
 
-std::vector<LeafHostInfo> only_string_leaves(const std::vector<LeafHostInfo>& all_leaves) {
+std::vector<LeafHostInfo> only_string_leaves(
+    const std::vector<LeafHostInfo>& all_leaves) {
   std::vector<LeafHostInfo> string_leaves;
-  std::copy_if(all_leaves.begin(), all_leaves.end(), std::back_inserter(string_leaves), [](const LeafHostInfo& leaf) {
-    return leaf.getRole() == NodeRole::String;
-  });
+  std::copy_if(
+      all_leaves.begin(),
+      all_leaves.end(),
+      std::back_inserter(string_leaves),
+      [](const LeafHostInfo& leaf) { return leaf.getRole() == NodeRole::String; });
   return string_leaves;
+}
+
+mapd::shared_ptr<MapDHandler> g_warmup_handler =
+    0;  // global "g_warmup_handler" needed to avoid circular dependency
+        // between "MapDHandler" & function "run_warmup_queries"
+mapd::shared_ptr<MapDHandler> g_mapd_handler = 0;
+
+void calcite_shutdown_handler() {
+  if (g_mapd_handler) {
+    g_mapd_handler->close_calcite_server();
+  }
 }
 
 void mapd_signal_handler(int signal_number) {
   LOG(INFO) << "Interrupt signal (" << signal_number << ") received.\n";
+  calcite_shutdown_handler();
   // shut down logging force a flush
   google::ShutdownGoogleLogging();
-
   // terminate program
-  exit(0);
+  if (signal_number == SIGTERM) {
+    std::exit(EXIT_SUCCESS);
+  } else {
+    std::exit(signal_number);
+  }
 }
 
 void register_signal_handler() {
@@ -136,10 +113,12 @@ void register_signal_handler() {
   // exit the startmapd script.
   // Only catching the SIGTERM(15) to avoid double shut down request
   // register SIGTERM and signal handler
-  signal(SIGTERM, mapd_signal_handler);
+  std::signal(SIGTERM, mapd_signal_handler);
+  std::signal(SIGSEGV, mapd_signal_handler);
+  std::signal(SIGABRT, mapd_signal_handler);
 }
 
-void start_server(TThreadPoolServer& server) {
+void start_server(TThreadedServer& server) {
   try {
     server.serve();
   } catch (std::exception& e) {
@@ -147,30 +126,29 @@ void start_server(TThreadPoolServer& server) {
   }
 }
 
-shared_ptr<MapDHandler> warmup_handler = 0;  // global "warmup_handler" needed to avoid circular dependency
-                                             // between "MapDHandler" & function "run_warmup_queries"
-
 void releaseWarmupSession(TSessionId& sessionId, std::ifstream& query_file) {
   query_file.close();
-  if (sessionId != warmup_handler->getInvalidSessionId()) {
-    warmup_handler->disconnect(sessionId);
+  if (sessionId != g_warmup_handler->getInvalidSessionId()) {
+    g_warmup_handler->disconnect(sessionId);
   }
 }
 
-void run_warmup_queries(boost::shared_ptr<MapDHandler> handler, std::string base_path, std::string query_file_path) {
+void run_warmup_queries(mapd::shared_ptr<MapDHandler> handler,
+                        std::string base_path,
+                        std::string query_file_path) {
   // run warmup queries to load cache if requested
   if (query_file_path.empty()) {
     return;
   }
   LOG(INFO) << "Running DB warmup with queries from " << query_file_path;
   try {
-    warmup_handler = handler;
+    g_warmup_handler = handler;
     std::string db_info;
     std::string user_keyword, user_name, db_name;
     std::ifstream query_file;
     Catalog_Namespace::UserMetadata user;
     Catalog_Namespace::DBMetadata db;
-    TSessionId sessionId = warmup_handler->getInvalidSessionId();
+    TSessionId sessionId = g_warmup_handler->getInvalidSessionId();
 
     ScopeGuard session_guard = [&] { releaseWarmupSession(sessionId, query_file); };
     query_file.open(query_file_path);
@@ -181,10 +159,11 @@ void run_warmup_queries(boost::shared_ptr<MapDHandler> handler, std::string base
       std::istringstream iss(db_info);
       iss >> user_keyword >> user_name >> db_name;
       if (user_keyword.compare(0, 4, "USER") == 0) {
-        // connect to DB for given user_name/db_name with super_user_rights (without password), & start session
-        warmup_handler->super_user_rights_ = true;
-        warmup_handler->connect(sessionId, user_name, "", db_name);
-        warmup_handler->super_user_rights_ = false;
+        // connect to DB for given user_name/db_name with super_user_rights (without
+        // password), & start session
+        g_warmup_handler->super_user_rights_ = true;
+        g_warmup_handler->connect(sessionId, user_name, "", db_name);
+        g_warmup_handler->super_user_rights_ = false;
 
         // read and run one query at a time for the DB with the setup connection
         TQueryResult ret;
@@ -197,23 +176,24 @@ void run_warmup_queries(boost::shared_ptr<MapDHandler> handler, std::string base
             single_query.clear();
             break;
           }
-          warmup_handler->sql_execute(ret, sessionId, single_query, true, "", -1);
+          g_warmup_handler->sql_execute(ret, sessionId, single_query, true, "", -1, -1);
           single_query.clear();
         }
 
         // stop session and disconnect from the DB
-        warmup_handler->disconnect(sessionId);
-        sessionId = warmup_handler->getInvalidSessionId();
+        g_warmup_handler->disconnect(sessionId);
+        sessionId = g_warmup_handler->getInvalidSessionId();
       } else {
         LOG(WARNING) << "\nSyntax error in the file: " << query_file_path.c_str()
-                     << " Missing expected keyword USER. Following line will be ignored: " << db_info.c_str()
-                     << std::endl;
+                     << " Missing expected keyword USER. Following line will be ignored: "
+                     << db_info.c_str() << std::endl;
       }
       db_info.clear();
     }
   } catch (...) {
     LOG(WARNING) << "Exception while executing warmup queries. "
-                 << "Warmup may not be fully completed. Will proceed nevertheless." << std::endl;
+                 << "Warmup may not be fully completed. Will proceed nevertheless."
+                 << std::endl;
   }
 }
 
@@ -230,24 +210,26 @@ int main(int argc, char** argv) {
   bool read_only = false;
   bool allow_loop_joins = false;
   bool enable_legacy_syntax = true;
-  LdapMetadata ldapMetadata;
+  AuthMetadata authMetadata;
   MapDParameters mapd_parameters;
   bool enable_rendering = false;
   bool enable_watchdog = true;
   bool enable_dynamic_watchdog = false;
   unsigned dynamic_watchdog_time_limit = 10000;
 
-  size_t cpu_buffer_mem_bytes = 0;  // 0 will cause DataMgr to auto set this based on available memory
   size_t render_mem_bytes = 500000000;
-  int num_gpus = -1;  // Can be used to override number of gpus detected on system - -1 means do not override
+  int num_gpus = -1;  // Can be used to override number of gpus detected on system - -1
+                      // means do not override
   int start_gpu = 0;
-  int tthreadpool_size = 8;
-  size_t num_reader_threads = 0;     // number of threads used when loading data
-  std::string start_epoch("");       // epoch value for the table, presented as: table_name:epoch
-  std::string decr_start_epoch("");  // value on which to decrement table's epoch, presented as: table_name:decrement
-  std::string db_convert_dir("");    // path to mapd DB to convert from; if path is empty, no conversion is requested
-  std::string db_query_file("");     // path to file containing warmup queries list
-  bool enable_access_priv_check = false;  // enable DB objects access privileges checking
+  size_t num_reader_threads = 0;   // number of threads used when loading data
+  std::string db_convert_dir("");  // path to mapd DB to convert from; if path is empty,
+                                   // no conversion is requested
+  std::string db_query_file("");   // path to file containing warmup queries list
+  bool enable_access_priv_check = true;  // enable DB objects access privileges checking
+  int idle_session_duration = 60;        // Inactive session tolerance in mins (60 mins)
+  int max_session_duration =
+      43200;  // maximum session life in mins (30 Days)
+              // (https://pages.nist.gov/800-63-3/sp800-63b.html#aal3reauth)
 
   namespace po = boost::program_options;
 
@@ -255,112 +237,191 @@ int main(int argc, char** argv) {
   desc.add_options()("help,h", "Print help messages");
   desc.add_options()("config", po::value<std::string>(&config_file), "Path to mapd.conf");
   desc.add_options()(
-      "data", po::value<std::string>(&base_path)->required()->default_value("data"), "Directory path to MapD catalogs");
+      "data",
+      po::value<std::string>(&base_path)->required()->default_value("data"),
+      "Directory path to MapD catalogs");
   desc.add_options()("cpu", "Run on CPU only");
   desc.add_options()("gpu", "Run on GPUs (Default)");
-  desc.add_options()("read-only",
-                     po::value<bool>(&read_only)->default_value(read_only)->implicit_value(true),
-                     "Enable read-only mode");
+  desc.add_options()(
+      "read-only",
+      po::value<bool>(&read_only)->default_value(read_only)->implicit_value(true),
+      "Enable read-only mode");
   desc.add_options()("port,p",
-                     po::value<int>(&mapd_parameters.mapd_server_port)->default_value(mapd_parameters.mapd_server_port),
+                     po::value<int>(&mapd_parameters.mapd_server_port)
+                         ->default_value(mapd_parameters.mapd_server_port),
                      "Port number");
-  desc.add_options()("http-port", po::value<int>(&http_port)->default_value(http_port), "HTTP port number");
-  desc.add_options()("flush-log",
-                     po::value<bool>(&flush_log)->default_value(flush_log)->implicit_value(true),
-                     "Immediately flush logs to disk. Set to false if this is a performance bottleneck.");
+  desc.add_options()("http-port",
+                     po::value<int>(&http_port)->default_value(http_port),
+                     "HTTP port number");
+  desc.add_options()("calcite-port",
+                     po::value<int>(&mapd_parameters.calcite_port)
+                         ->default_value(mapd_parameters.calcite_port),
+                     "Calcite port number");
+  desc.add_options()(
+      "flush-log",
+      po::value<bool>(&flush_log)->default_value(flush_log)->implicit_value(true),
+      "Immediately flush logs to disk. Set to false if this is a performance "
+      "bottleneck.");
   desc.add_options()("cpu-buffer-mem-bytes",
-                     po::value<size_t>(&cpu_buffer_mem_bytes)->default_value(cpu_buffer_mem_bytes),
+                     po::value<size_t>(&mapd_parameters.cpu_buffer_mem_bytes)
+                         ->default_value(mapd_parameters.cpu_buffer_mem_bytes),
                      "Size of memory reserved for CPU buffers [bytes]");
-  desc.add_options()("num-gpus", po::value<int>(&num_gpus)->default_value(num_gpus), "Number of gpus to use");
-  desc.add_options()("start-gpu", po::value<int>(&start_gpu)->default_value(start_gpu), "First gpu to use");
+  desc.add_options()("gpu-buffer-mem-bytes",
+                     po::value<size_t>(&mapd_parameters.gpu_buffer_mem_bytes)
+                         ->default_value(mapd_parameters.gpu_buffer_mem_bytes),
+                     "Size of memory reserved for GPU buffers [bytes] (per GPU)");
+
+  desc.add_options()("num-gpus",
+                     po::value<int>(&num_gpus)->default_value(num_gpus),
+                     "Number of gpus to use");
+  desc.add_options()("start-gpu",
+                     po::value<int>(&start_gpu)->default_value(start_gpu),
+                     "First gpu to use");
   desc.add_options()("version,v", "Print Release Version Number");
   desc.add_options()("null-div-by-zero",
-                     po::value<bool>(&g_null_div_by_zero)->default_value(g_null_div_by_zero)->implicit_value(true),
+                     po::value<bool>(&g_null_div_by_zero)
+                         ->default_value(g_null_div_by_zero)
+                         ->implicit_value(true),
                      "Return null on division by zero instead of throwing an exception");
+  desc.add_options()("left-deep-join-optimization",
+                     po::value<bool>(&g_left_deep_join_optimization)
+                         ->default_value(g_left_deep_join_optimization)
+                         ->implicit_value(true),
+                     "Enable left-deep join optimization");
+  desc.add_options()("from-table-reordering",
+                     po::value<bool>(&g_from_table_reordering)
+                         ->default_value(g_from_table_reordering)
+                         ->implicit_value(true),
+                     "Enable automatic table reordering in FROM clause");
+  desc.add_options()("enable-watchdog",
+                     po::value<bool>(&enable_watchdog)
+                         ->default_value(enable_watchdog)
+                         ->implicit_value(true),
+                     "Enable watchdog");
+  desc.add_options()("help-advanced",
+                     "Print advanced and experimental options. These options should not "
+                     "normally be used in production.");
 
   po::options_description desc_adv("Advanced options");
-  desc_adv.add_options()("help-advanced", "Print advanced help messages");
-  desc_adv.add_options()("calcite-port",
-                         po::value<int>(&mapd_parameters.calcite_port)->default_value(mapd_parameters.calcite_port),
-                         "Calcite port number");
-  desc_adv.add_options()("jit-debug",
-                         po::value<bool>(&jit_debug)->default_value(jit_debug)->implicit_value(true),
-                         "Enable debugger support for the JIT. The generated code can be found at /tmp/mapdquery");
-  desc_adv.add_options()("disable-multifrag",
-                         po::value<bool>(&allow_multifrag)->default_value(allow_multifrag)->implicit_value(false),
-                         "Disable execution over multiple fragments in a single round-trip to GPU");
+  desc_adv.add_options()(
+      "jit-debug",
+      po::value<bool>(&jit_debug)->default_value(jit_debug)->implicit_value(true),
+      "Enable debugger support for the JIT. The generated code can be found at "
+      "/tmp/mapdquery");
+  desc_adv.add_options()(
+      "disable-multifrag",
+      po::value<bool>(&allow_multifrag)
+          ->default_value(allow_multifrag)
+          ->implicit_value(false),
+      "Disable execution over multiple fragments in a single round-trip to GPU");
   desc_adv.add_options()("allow-loop-joins",
-                         po::value<bool>(&allow_loop_joins)->default_value(allow_loop_joins)->implicit_value(true),
+                         po::value<bool>(&allow_loop_joins)
+                             ->default_value(allow_loop_joins)
+                             ->implicit_value(true),
                          "Enable loop joins");
-  desc_adv.add_options()("res-gpu-mem",
-                         po::value<size_t>(&reserved_gpu_mem)->default_value(reserved_gpu_mem),
-                         "Reserved memory for GPU, not use mapd allocator");
+  desc_adv.add_options()("fast-strcmp",
+                         po::value<bool>(&g_fast_strcmp)
+                             ->default_value(g_fast_strcmp)
+                             ->implicit_value(false),
+                         "Disable fast string comparison");
   desc_adv.add_options()(
-      "disable-legacy-syntax",
-      po::value<bool>(&enable_legacy_syntax)->default_value(enable_legacy_syntax)->implicit_value(false),
-      "Enable legacy syntax");
-  desc_adv.add_options()("tthreadpool-size",
-                         po::value<int>(&tthreadpool_size)->default_value(tthreadpool_size),
-                         "Server thread pool size. Increasing may adversely affect render performance and stability.");
-  desc_adv.add_options()("num-reader-threads",
-                         po::value<size_t>(&num_reader_threads)->default_value(num_reader_threads),
-                         "Number of reader threads to use");
-  desc_adv.add_options()("enable-watchdog",
-                         po::value<bool>(&enable_watchdog)->default_value(enable_watchdog)->implicit_value(true),
-                         "Enable watchdog");
+      "res-gpu-mem",
+      po::value<size_t>(&reserved_gpu_mem)->default_value(reserved_gpu_mem),
+      "Reserved memory for GPU, not use mapd allocator");
+  desc_adv.add_options()("disable-legacy-syntax",
+                         po::value<bool>(&enable_legacy_syntax)
+                             ->default_value(enable_legacy_syntax)
+                             ->implicit_value(false),
+                         "Enable legacy syntax");
   desc_adv.add_options()(
-      "enable-dynamic-watchdog",
-      po::value<bool>(&enable_dynamic_watchdog)->default_value(enable_dynamic_watchdog)->implicit_value(true),
-      "Enable dynamic watchdog");
+      "num-reader-threads",
+      po::value<size_t>(&num_reader_threads)->default_value(num_reader_threads),
+      "Number of reader threads to use");
+  desc_adv.add_options()("enable-dynamic-watchdog",
+                         po::value<bool>(&enable_dynamic_watchdog)
+                             ->default_value(enable_dynamic_watchdog)
+                             ->implicit_value(true),
+                         "Enable dynamic watchdog");
   desc_adv.add_options()("dynamic-watchdog-time-limit",
                          po::value<unsigned>(&dynamic_watchdog_time_limit)
                              ->default_value(dynamic_watchdog_time_limit)
                              ->implicit_value(10000),
                          "Dynamic watchdog time limit, in milliseconds");
-  desc_adv.add_options()(
-      "trivial-loop-join-threshold",
-      po::value<unsigned>(&g_trivial_loop_join_threshold)
-          ->default_value(g_trivial_loop_join_threshold)
-          ->implicit_value(1000),
-      "The maximum number of rows in the inner table of a loop join considered to be trivially small");
-  desc_adv.add_options()("start-epoch", po::value<std::string>(&start_epoch), "Value of table epoch to 'rollback' to");
-  desc_adv.add_options()("decrement-start-epoch",
-                         po::value<std::string>(&decr_start_epoch),
-                         "Value on which to decrement epoch of the table");
-  desc_adv.add_options()(
-      "cuda-block-size",
-      po::value<size_t>(&mapd_parameters.cuda_block_size)->default_value(mapd_parameters.cuda_block_size),
-      "Size of block to use on GPU");
-  desc_adv.add_options()(
-      "cuda-grid-size",
-      po::value<size_t>(&mapd_parameters.cuda_grid_size)->default_value(mapd_parameters.cuda_grid_size),
-      "Size of grid to use on GPU");
-  desc_adv.add_options()(
-      "calcite-max-mem",
-      po::value<size_t>(&mapd_parameters.calcite_max_mem)->default_value(mapd_parameters.calcite_max_mem),
-      "Max memory available to calcite JVM");
-  desc_adv.add_options()(
-      "db-convert", po::value<std::string>(&db_convert_dir), "Directory path to mapd DB to convert from");
+  desc_adv.add_options()("enable-debug-timer",
+                         po::value<bool>(&g_enable_debug_timer)
+                             ->default_value(g_enable_debug_timer)
+                             ->implicit_value(true),
+                         "Enable debug timer logging");
+  desc_adv.add_options()("trivial-loop-join-threshold",
+                         po::value<unsigned>(&g_trivial_loop_join_threshold)
+                             ->default_value(g_trivial_loop_join_threshold)
+                             ->implicit_value(1000),
+                         "The maximum number of rows in the inner table of a loop join "
+                         "considered to be trivially small");
+  desc_adv.add_options()("cuda-block-size",
+                         po::value<size_t>(&mapd_parameters.cuda_block_size)
+                             ->default_value(mapd_parameters.cuda_block_size),
+                         "Size of block to use on GPU");
+  desc_adv.add_options()("cuda-grid-size",
+                         po::value<size_t>(&mapd_parameters.cuda_grid_size)
+                             ->default_value(mapd_parameters.cuda_grid_size),
+                         "Size of grid to use on GPU");
+  desc_adv.add_options()("calcite-max-mem",
+                         po::value<size_t>(&mapd_parameters.calcite_max_mem)
+                             ->default_value(mapd_parameters.calcite_max_mem),
+                         "Max memory available to calcite JVM");
+  desc_adv.add_options()("db-convert",
+                         po::value<std::string>(&db_convert_dir),
+                         "Directory path to mapd DB to convert from");
 
   desc_adv.add_options()("use-result-set",
-                         po::value<bool>(&g_use_result_set)->default_value(g_use_result_set)->implicit_value(true),
+                         po::value<bool>(&g_use_result_set)
+                             ->default_value(g_use_result_set)
+                             ->implicit_value(true),
                          "Use the new result set");
   desc_adv.add_options()("bigint-count",
-                         po::value<bool>(&g_bigint_count)->default_value(g_bigint_count)->implicit_value(false),
+                         po::value<bool>(&g_bigint_count)
+                             ->default_value(g_bigint_count)
+                             ->implicit_value(false),
                          "Use 64-bit count");
   desc_adv.add_options()("allow-cpu-retry",
-                         po::value<bool>(&g_allow_cpu_retry)->default_value(g_allow_cpu_retry)->implicit_value(true),
-                         "Allow the queries which failed on GPU to retry on CPU, even when watchdog is enabled");
-  desc_adv.add_options()(
-      "db-query-list", po::value<std::string>(&db_query_file), "Path to file containing mapd queries");
-  desc_adv.add_options()(
-      "enable-access-priv-check",
-      po::value<bool>(&enable_access_priv_check)->default_value(enable_access_priv_check)->implicit_value(false),
-      "Check user access privileges to database objects");
+                         po::value<bool>(&g_allow_cpu_retry)
+                             ->default_value(g_allow_cpu_retry)
+                             ->implicit_value(true),
+                         "Allow the queries which failed on GPU to retry on CPU, even "
+                         "when watchdog is enabled");
+  desc_adv.add_options()("db-query-list",
+                         po::value<std::string>(&db_query_file),
+                         "Path to file containing mapd queries");
+  desc_adv.add_options()("enable-access-priv-check",
+                         po::value<bool>(&enable_access_priv_check)
+                             ->default_value(enable_access_priv_check)
+                             ->implicit_value(true),
+                         "Check user access privileges to database objects");
   desc_adv.add_options()(
       "hll-precision-bits",
-      po::value<int>(&g_hll_precision_bits)->default_value(g_hll_precision_bits)->implicit_value(g_hll_precision_bits),
+      po::value<int>(&g_hll_precision_bits)
+          ->default_value(g_hll_precision_bits)
+          ->implicit_value(g_hll_precision_bits),
       "Number of bits used from the hash value used to specify the bucket number.");
+  desc_adv.add_options()("inner-join-fragment-skipping",
+                         po::value<bool>(&g_inner_join_fragment_skipping)
+                             ->default_value(g_inner_join_fragment_skipping)
+                             ->implicit_value(true),
+                         "Enable/disable inner join fragment skipping.");
+  desc_adv.add_options()("disable-shared-mem-group-by",
+                         po::value<bool>(&g_enable_smem_group_by)
+                             ->default_value(g_enable_smem_group_by)
+                             ->implicit_value(false),
+                         "Enable/disable using GPU shared memory for GROUP BY.");
+  desc_adv.add_options()(
+      "idle-session-duration",
+      po::value<int>(&idle_session_duration)->default_value(idle_session_duration),
+      "Maximum duration of idle session.");
+  desc_adv.add_options()(
+      "max-session-duration",
+      po::value<int>(&max_session_duration)->default_value(max_session_duration),
+      "Maximum duration of active session.");
 
   po::positional_options_description positionalOptions;
   positionalOptions.add("data", 1);
@@ -374,7 +435,11 @@ int main(int argc, char** argv) {
   std::vector<LeafHostInfo> string_leaves;
 
   try {
-    po::store(po::command_line_parser(argc, argv).options(desc_all).positional(positionalOptions).run(), vm);
+    po::store(po::command_line_parser(argc, argv)
+                  .options(desc_all)
+                  .positional(positionalOptions)
+                  .run(),
+              vm);
     po::notify(vm);
 
     if (vm.count("config")) {
@@ -400,18 +465,22 @@ int main(int argc, char** argv) {
     }
 
     if (vm.count("help")) {
-      std::cout << "Usage: mapd_server <catalog path> [<database name>] [--cpu|--gpu] [-p <port "
-                   "number>] [--http-port <http port number>] [--flush-log] [--version|-v]"
-                << std::endl
-                << std::endl;
+      std::cout
+          << "Usage: mapd_server <catalog path> [<database name>] [--cpu|--gpu] [-p "
+             "<port "
+             "number>] [--http-port <http port number>] [--flush-log] [--version|-v]"
+          << std::endl
+          << std::endl;
       std::cout << desc << std::endl;
       return 0;
     }
     if (vm.count("help-advanced")) {
-      std::cout << "Usage: mapd_server <catalog path> [<database name>] [--cpu|--gpu] [-p <port "
-                   "number>] [--http-port <http port number>] [--flush-log] [--version|-v]"
-                << std::endl
-                << std::endl;
+      std::cout
+          << "Usage: mapd_server <catalog path> [<database name>] [--cpu|--gpu] [-p "
+             "<port "
+             "number>] [--http-port <http port number>] [--flush-log] [--version|-v]"
+          << std::endl
+          << std::endl;
       std::cout << desc_all << std::endl;
       return 0;
     }
@@ -419,15 +488,19 @@ int main(int argc, char** argv) {
       std::cout << "MapD Version: " << MAPD_RELEASE << std::endl;
       return 0;
     }
-    if (vm.count("cpu"))
+    if (vm.count("cpu")) {
       device = "cpu";
-    if (vm.count("gpu"))
+    }
+    if (vm.count("gpu")) {
       device = "gpu";
-    if (num_gpus == 0)
+    }
+    if (num_gpus == 0) {
       device = "cpu";
+    }
 
-    if (device == "cpu")
+    if (device == "cpu") {
       enable_rendering = false;
+    }
 
     g_enable_watchdog = enable_watchdog;
     g_enable_dynamic_watchdog = enable_dynamic_watchdog;
@@ -441,34 +514,12 @@ int main(int argc, char** argv) {
     std::cerr << "hll-precision-bits must be between 1 and 16." << std::endl;
     return 1;
   }
-  boost::algorithm::trim_if(db_query_file, boost::is_any_of("\"'"));
-  if (db_query_file.length() > 0 && !boost::filesystem::exists(db_query_file)) {
-    std::cerr << "File containing DB queries " << db_query_file << " does not exist." << std::endl;
-    return 1;
-  }
-  boost::algorithm::trim_if(db_convert_dir, boost::is_any_of("\"'"));
-  if (db_convert_dir.length() > 0 && !boost::filesystem::exists(db_convert_dir)) {
-    std::cerr << "Data conversion source directory " << db_convert_dir << " does not exist." << std::endl;
-    return 1;
-  }
+
   boost::algorithm::trim_if(base_path, boost::is_any_of("\"'"));
-  if (!boost::filesystem::exists(base_path)) {
-    std::cerr << "Data directory " << base_path << " does not exist." << std::endl;
-    return 1;
-  }
-  const auto system_db_file = boost::filesystem::path(base_path) / "mapd_catalogs" / "mapd";
-  if (!boost::filesystem::exists(system_db_file)) {
-    std::cerr << "MapD system catalogs does not exist at " << system_db_file << ". Run initdb" << std::endl;
-    return 1;
-  }
   const auto data_path = boost::filesystem::path(base_path) / "mapd_data";
   if (!boost::filesystem::exists(data_path)) {
-    std::cerr << "MapD data directory does not exist at " << base_path << ". Run initdb" << std::endl;
-    return 1;
-  }
-  const auto db_file = boost::filesystem::path(base_path) / "mapd_catalogs" / MAPD_SYSTEM_DB;
-  if (!boost::filesystem::exists(db_file)) {
-    std::cerr << "MapD database " << MAPD_SYSTEM_DB << " does not exist." << std::endl;
+    std::cerr << "MapD data directory does not exist at '" << base_path
+              << "'. Run initdb " << base_path << std::endl;
     return 1;
   }
 
@@ -476,22 +527,30 @@ int main(int argc, char** argv) {
   auto pid = std::to_string(getpid());
   int pid_fd = open(lock_file.c_str(), O_RDWR | O_CREAT, 0644);
   if (pid_fd == -1) {
-    std::cerr << "Failed to open PID file " << lock_file << ". " << strerror(errno) << "." << std::endl;
+    auto err = std::string("Failed to open PID file ") + std::string(lock_file.c_str()) +
+               std::string(". ") + strerror(errno) + ".";
+    std::cerr << err << std::endl;
     return 1;
   }
   if (lockf(pid_fd, F_TLOCK, 0) == -1) {
-    std::cerr << "Another MapD Server is using data directory " << boost::filesystem::path(base_path) << "."
-              << std::endl;
+    auto err = std::string("Another MapD Server is using data directory ") + base_path +
+               std::string(".");
+    std::cerr << err << std::endl;
     close(pid_fd);
     return 1;
   }
   if (ftruncate(pid_fd, 0) == -1) {
-    std::cerr << "Failed to truncate PID file " << lock_file << ". " << strerror(errno) << "." << std::endl;
+    auto err = std::string("Failed to truncate PID file ") +
+               std::string(lock_file.c_str()) + std::string(". ") + strerror(errno) +
+               std::string(".");
+    std::cerr << err << std::endl;
     close(pid_fd);
     return 1;
   }
   if (write(pid_fd, pid.c_str(), pid.length()) == -1) {
-    std::cerr << "Failed to write PID file " << lock_file << ". " << strerror(errno) << "." << std::endl;
+    auto err = std::string("Failed to write PID file ") + std::string(lock_file.c_str()) +
+               ". " + strerror(errno) + ".";
+    std::cerr << err << std::endl;
     close(pid_fd);
     return 1;
   }
@@ -499,20 +558,69 @@ int main(int argc, char** argv) {
   const auto log_path = boost::filesystem::path(base_path) / "mapd_log";
   (void)boost::filesystem::create_directory(log_path);
   FLAGS_log_dir = log_path.c_str();
-  if (flush_log)
+  if (flush_log) {
     FLAGS_logbuflevel = -1;
+  }
   // Initialize Google's logging library.
   google::InitGoogleLogging(argv[0]);
+
+  boost::algorithm::trim_if(db_query_file, boost::is_any_of("\"'"));
+  if (db_query_file.length() > 0 && !boost::filesystem::exists(db_query_file)) {
+    LOG(ERROR) << "File containing DB queries " << db_query_file << " does not exist.";
+    return 1;
+  }
+  boost::algorithm::trim_if(db_convert_dir, boost::is_any_of("\"'"));
+  if (db_convert_dir.length() > 0 && !boost::filesystem::exists(db_convert_dir)) {
+    LOG(ERROR) << "Data conversion source directory " << db_convert_dir
+               << " does not exist.";
+    return 1;
+  }
+  const auto system_db_file =
+      boost::filesystem::path(base_path) / "mapd_catalogs" / "mapd";
+  if (!boost::filesystem::exists(system_db_file)) {
+    LOG(ERROR) << "MapD system catalogs does not exist at " << system_db_file;
+    return 1;
+  }
+  const auto db_file =
+      boost::filesystem::path(base_path) / "mapd_catalogs" / MAPD_SYSTEM_DB;
+  if (!boost::filesystem::exists(db_file)) {
+    LOG(ERROR) << "MapD database " << MAPD_SYSTEM_DB << " does not exist.";
+    return 1;
+  }
 
   // add all parameters to be displayed on startup
   LOG(INFO) << "MapD started with data directory at '" << base_path << "'";
   if (vm.count("cluster")) {
-    LOG(INFO) << "Cluster file specified running as aggregator with config at '" << cluster_file << "'";
+    LOG(INFO) << "Cluster file specified running as aggregator with config at '"
+              << cluster_file << "'";
   }
   if (vm.count("string-servers")) {
-    LOG(INFO) << "String servers file specified running as dbleaf with config at '" << cluster_file << "'";
+    LOG(INFO) << "String servers file specified running as dbleaf with config at '"
+              << cluster_file << "'";
   }
   LOG(INFO) << " Watchdog is set to " << enable_watchdog;
+  LOG(INFO) << " Dynamic Watchdog is set to " << enable_dynamic_watchdog;
+  if (enable_dynamic_watchdog) {
+    LOG(INFO) << " Dynamic Watchdog timeout is set to " << dynamic_watchdog_time_limit;
+  }
+
+  LOG(INFO) << " Enable access priv check  is set to " << enable_access_priv_check;
+
+  LOG(INFO) << " Debug Timer is set to " << g_enable_debug_timer;
+
+  LOG(INFO) << " Maximum Idle session duration " << idle_session_duration;
+
+  LOG(INFO) << " Maximum active session duration " << max_session_duration;
+
+  if (!g_from_table_reordering) {
+    LOG(INFO) << " From clause table reordering is disabled";
+  }
+
+  boost::algorithm::trim_if(mapd_parameters.ha_brokers, boost::is_any_of("\"'"));
+  boost::algorithm::trim_if(mapd_parameters.ha_group_id, boost::is_any_of("\"'"));
+  boost::algorithm::trim_if(mapd_parameters.ha_shared_data, boost::is_any_of("\"'"));
+  boost::algorithm::trim_if(mapd_parameters.ha_unique_server_id, boost::is_any_of("\"'"));
+
   if (!mapd_parameters.ha_group_id.empty()) {
     LOG(INFO) << " HA group id " << mapd_parameters.ha_group_id;
     if (mapd_parameters.ha_unique_server_id.empty()) {
@@ -531,7 +639,7 @@ int main(int argc, char** argv) {
       LOG(ERROR) << "Starting server in HA mode --ha-shared-data must be set ";
       return 7;
     } else {
-      LOG(INFO) << " HA shared data is " << mapd_parameters.ha_unique_server_id;
+      LOG(INFO) << " HA shared data is " << mapd_parameters.ha_shared_data;
     }
   }
   LOG(INFO) << " cuda block size " << mapd_parameters.cuda_block_size;
@@ -540,61 +648,20 @@ int main(int argc, char** argv) {
   LOG(INFO) << " MapD Server Port  " << mapd_parameters.mapd_server_port;
   LOG(INFO) << " MapD Calcite Port  " << mapd_parameters.calcite_port;
 
-  // extract and validate value of the epoch to rollback to for the table if requested
-  bool is_decr_start_epoch = false;
-  if ((start_epoch.length() > 0) && (decr_start_epoch.length() > 0)) {
-    LOG(ERROR) << "Options start-epoch and decrement-start-epoch can't be used simultaneously." << std::endl;
-    throw std::runtime_error("Improper usage of options start-epoch and decrement-start-epoch.");
-  }
-  if (decr_start_epoch.length() > 0) {
-    start_epoch = decr_start_epoch;
-    is_decr_start_epoch = true;
-  }
-  std::string start_epoch_table("");
-  int start_epoch_int_value = -1;
-  if (start_epoch.length() > 0) {
-    std::string start_epoch_value("");
-    std::string start_epoch_delimiter(":");
-    size_t pos = start_epoch.find(start_epoch_delimiter);
-    if (pos == std::string::npos) {
-      if (!is_decr_start_epoch) {
-        LOG(ERROR) << "Value of option start-epoch does not contain delimiter: " << start_epoch << std::endl;
-        throw std::runtime_error("Option start-epoch is not correct.");
-      } else {
-        LOG(ERROR) << "Value of option decrement-start-epoch does not contain delimiter: " << start_epoch << std::endl;
-        throw std::runtime_error("Option decrement-start-epoch is not correct.");
-      }
-    }
-    start_epoch_table = start_epoch.substr(0, pos);
-    start_epoch_value = start_epoch.substr(pos + 1, start_epoch.length());
-    try {
-      start_epoch_int_value = std::stoi(start_epoch_value);
-    } catch (std::exception& e) {
-      if (!is_decr_start_epoch) {
-        LOG(ERROR) << "Value of option start-epoch has incorrect epoch number: " << start_epoch << std::endl;
-        throw std::runtime_error("Option start-epoch is not correct.");
-      } else {
-        LOG(ERROR) << "Value of option decrement-start-epoch has incorrect decrement: " << start_epoch << std::endl;
-        throw std::runtime_error("Option decrement-start-epoch is not correct.");
-      }
-    }
-    if (start_epoch_int_value < 0) {
-      if (!is_decr_start_epoch) {
-        LOG(ERROR) << "Epoch value of option start-epoch can not be negative: " << start_epoch << std::endl;
-        throw std::runtime_error("Option start-epoch is not correct.");
-      } else {
-        LOG(ERROR) << "Epoch decrement value of option decrement-start-epoch can not be negative: " << start_epoch
-                   << std::endl;
-        throw std::runtime_error("Option decrement-start-epoch is not correct.");
-      }
-    }
-  }
+  boost::algorithm::trim_if(authMetadata.distinguishedName, boost::is_any_of("\"'"));
+  boost::algorithm::trim_if(authMetadata.uri, boost::is_any_of("\"'"));
+  boost::algorithm::trim_if(authMetadata.ldapQueryUrl, boost::is_any_of("\"'"));
+  boost::algorithm::trim_if(authMetadata.ldapRoleRegex, boost::is_any_of("\"'"));
+  boost::algorithm::trim_if(authMetadata.ldapSuperUserRole, boost::is_any_of("\"'"));
+  boost::algorithm::trim_if(authMetadata.restToken, boost::is_any_of("\"'"));
+  boost::algorithm::trim_if(authMetadata.restUrl, boost::is_any_of("\"'"));
 
   // rudimetary signal handling to try to guarantee the logging gets flushed to files
   // on shutdown
   register_signal_handler();
+  google::InstallFailureFunction(&calcite_shutdown_handler);
 
-  shared_ptr<MapDHandler> handler(new MapDHandler(db_leaves,
+  g_mapd_handler = mapd::make_shared<MapDHandler>(db_leaves,
                                                   string_leaves,
                                                   base_path,
                                                   device,
@@ -603,44 +670,43 @@ int main(int argc, char** argv) {
                                                   read_only,
                                                   allow_loop_joins,
                                                   enable_rendering,
-                                                  cpu_buffer_mem_bytes,
                                                   render_mem_bytes,
                                                   num_gpus,
                                                   start_gpu,
                                                   reserved_gpu_mem,
                                                   num_reader_threads,
-                                                  start_epoch_table,
-                                                  start_epoch_int_value,
-                                                  is_decr_start_epoch,
-                                                  ldapMetadata,
+                                                  authMetadata,
                                                   mapd_parameters,
                                                   db_convert_dir,
                                                   enable_legacy_syntax,
-                                                  enable_access_priv_check));
+                                                  enable_access_priv_check,
+                                                  idle_session_duration,
+                                                  max_session_duration);
 
   if (mapd_parameters.ha_group_id.empty()) {
-    shared_ptr<TProcessor> processor(new MapDProcessor(handler));
+    mapd::shared_ptr<TProcessor> processor(new MapDProcessor(g_mapd_handler));
 
-    shared_ptr<ThreadManager> threadManager = ThreadManager::newSimpleThreadManager(tthreadpool_size);
-    threadManager->threadFactory(make_shared<PlatformThreadFactory>());
-    threadManager->start();
-    shared_ptr<TServerTransport> bufServerTransport(new TServerSocket(mapd_parameters.mapd_server_port));
+    mapd::shared_ptr<TServerTransport> bufServerTransport(
+        new TServerSocket(mapd_parameters.mapd_server_port));
 
-    shared_ptr<TTransportFactory> bufTransportFactory(new TBufferedTransportFactory());
-    shared_ptr<TProtocolFactory> bufProtocolFactory(new TBinaryProtocolFactory());
-    TThreadPoolServer bufServer(processor, bufServerTransport, bufTransportFactory, bufProtocolFactory, threadManager);
+    mapd::shared_ptr<TTransportFactory> bufTransportFactory(
+        new TBufferedTransportFactory());
+    mapd::shared_ptr<TProtocolFactory> bufProtocolFactory(new TBinaryProtocolFactory());
+    TThreadedServer bufServer(
+        processor, bufServerTransport, bufTransportFactory, bufProtocolFactory);
 
-    shared_ptr<TServerTransport> httpServerTransport(new TServerSocket(http_port));
-    shared_ptr<TTransportFactory> httpTransportFactory(new THttpServerTransportFactory());
-    shared_ptr<TProtocolFactory> httpProtocolFactory(new TJSONProtocolFactory());
-    TThreadPoolServer httpServer(
-        processor, httpServerTransport, httpTransportFactory, httpProtocolFactory, threadManager);
+    mapd::shared_ptr<TServerTransport> httpServerTransport(new TServerSocket(http_port));
+    mapd::shared_ptr<TTransportFactory> httpTransportFactory(
+        new THttpServerTransportFactory());
+    mapd::shared_ptr<TProtocolFactory> httpProtocolFactory(new TJSONProtocolFactory());
+    TThreadedServer httpServer(
+        processor, httpServerTransport, httpTransportFactory, httpProtocolFactory);
 
     std::thread bufThread(start_server, std::ref(bufServer));
     std::thread httpThread(start_server, std::ref(httpServer));
 
     // run warm up queries if any exists
-    run_warmup_queries(handler, base_path, db_query_file);
+    run_warmup_queries(g_mapd_handler, base_path, db_query_file);
 
     bufThread.join();
     httpThread.join();

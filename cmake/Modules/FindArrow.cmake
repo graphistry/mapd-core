@@ -50,6 +50,17 @@ find_library(Arrow_LIBRARY
   /usr/local/homebrew/lib
   /opt/local/lib)
 
+find_library(Arrow_GPU_LIBRARY
+  NAMES arrow_gpu
+  HINTS
+  ENV LD_LIBRARY_PATH
+  ENV DYLD_LIBRARY_PATH
+  PATHS
+  /usr/lib
+  /usr/local/lib
+  /usr/local/homebrew/lib
+  /opt/local/lib)
+
 get_filename_component(Arrow_LIBRARY_DIR ${Arrow_LIBRARY} DIRECTORY)
 
 if(Arrow_USE_STATIC_LIBS)
@@ -58,8 +69,21 @@ endif()
 
 # Set standard CMake FindPackage variables if found.
 set(Arrow_LIBRARIES ${Arrow_LIBRARY})
+set(Arrow_GPU_LIBRARIES ${Arrow_GPU_LIBRARY})
 set(Arrow_LIBRARY_DIRS ${Arrow_LIBRARY_DIR})
 set(Arrow_INCLUDE_DIRS ${Arrow_LIBRARY_DIR}/../include)
+
+try_compile(HAVE_ARROW_STATIC_RECORDBATCH_CTOR
+  ${CMAKE_CURRENT_BINARY_DIR}
+  ${CMAKE_SOURCE_DIR}/cmake/Modules/arrow_static_recordbatch.cpp
+  COMPILE_DEFINITIONS -I${Arrow_INCLUDE_DIRS}
+  LINK_LIBRARIES ${Arrow_LIBRARY})
+
+try_compile(HAVE_ARROW_APPENDVALUES
+  ${CMAKE_CURRENT_BINARY_DIR}
+  ${CMAKE_SOURCE_DIR}/cmake/Modules/arrow_appendvalues.cpp
+  COMPILE_DEFINITIONS -I${Arrow_INCLUDE_DIRS}
+  LINK_LIBRARIES ${Arrow_LIBRARY})
 
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(Arrow REQUIRED_VARS Arrow_LIBRARY)

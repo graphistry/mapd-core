@@ -78,6 +78,12 @@ class ExtensionFunctionSignatureParser {
         if (type_name.startsWith(const_prefix)) {
             return deserializeType(type_name.substring(const_prefix.length()));
         }
+        if (type_name.equals("bool") || type_name.equals("_Bool")) {
+            return ExtensionFunction.ExtArgumentType.Bool;
+        }
+        if (type_name.equals("int8_t") || type_name.equals("char")) {
+            return ExtensionFunction.ExtArgumentType.Int8;
+        }
         if (type_name.equals("int16_t")) {
             return ExtensionFunction.ExtArgumentType.Int16;
         }
@@ -93,7 +99,7 @@ class ExtensionFunctionSignatureParser {
         if (type_name.equals("double")) {
             return ExtensionFunction.ExtArgumentType.Double;
         }
-        if (type_name.equals("void")) {
+        if (type_name.isEmpty() || type_name.equals("void")) {
             return ExtensionFunction.ExtArgumentType.Void;
         }
         if (type_name.endsWith(" *")) {
@@ -105,6 +111,8 @@ class ExtensionFunctionSignatureParser {
 
     private static ExtensionFunction.ExtArgumentType pointerType(final ExtensionFunction.ExtArgumentType targetType) {
         switch (targetType) {
+            case Int8:
+                return ExtensionFunction.ExtArgumentType.PInt8;
             case Int16:
                 return ExtensionFunction.ExtArgumentType.PInt16;
             case Int32:

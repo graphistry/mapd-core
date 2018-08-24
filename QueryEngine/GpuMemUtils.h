@@ -18,18 +18,8 @@
 #define QUERYENGINE_GPUMEMUTILS_H
 
 #include "CompilationOptions.h"
+#include "Rendering/RenderAllocator.h"
 #include "ThrustAllocator.h"
-
-namespace QueryRenderer {
-typedef void QueryRenderManager;
-typedef void QueryDataLayout;
-}  // namespace QueryRenderer
-
-#ifdef HAVE_CUDA
-#include <cuda.h>
-#else
-#include "../Shared/nocuda.h"
-#endif  // HAVE_CUDA
 
 #include <cstddef>
 #include <cstdint>
@@ -41,85 +31,27 @@ namespace CudaMgr_Namespace {
 
 class CudaMgr;
 
-}  // CudaMgr_Namespace
+}  // namespace CudaMgr_Namespace
 
 namespace Data_Namespace {
 
 class AbstractBuffer;
 class DataMgr;
 
-}  // Data_Namespace
-
-class OutOfRenderMemory : public std::runtime_error {
- public:
-  OutOfRenderMemory() : std::runtime_error("OutOfMemory") {}
-};
-
-class RenderAllocator {
- public:
-  RenderAllocator(int8_t* preallocated_ptr,
-                  const size_t preallocated_size,
-                  const unsigned block_size_x,
-                  const unsigned grid_size_x);
-
-  CUdeviceptr alloc(const size_t bytes) {
-    auto ptr = preallocated_ptr_ + crt_allocated_bytes_;
-    crt_allocated_bytes_ += bytes;
-    if (crt_allocated_bytes_ <= preallocated_size_) {
-      return reinterpret_cast<CUdeviceptr>(ptr);
-    }
-
-    // reset the current allocated bytes for a proper
-    // error resolution
-    crt_allocated_bytes_ = 0;
-    throw OutOfRenderMemory();
-  }
-
-  void markChunkComplete() { crt_chunk_offset_bytes_ = crt_allocated_bytes_; }
-
-  size_t getCurrentChunkOffset() const { return crt_chunk_offset_bytes_; }
-  size_t getCurrentChunkSize() const { return crt_allocated_bytes_ - crt_chunk_offset_bytes_; }
-  size_t getAllocatedSize() const { return crt_allocated_bytes_; }
-
-  int8_t* getBasePtr() const { return preallocated_ptr_; }
-
- private:
-  int8_t* preallocated_ptr_;
-  const size_t preallocated_size_;
-  size_t crt_chunk_offset_bytes_;
-  size_t crt_allocated_bytes_;
-};
-
-class RenderAllocatorMap {
- public:
-  RenderAllocatorMap(::CudaMgr_Namespace::CudaMgr* cuda_mgr,
-                     ::QueryRenderer::QueryRenderManager* render_manager,
-                     const unsigned block_size_x,
-                     const unsigned grid_size_x);
-  ~RenderAllocatorMap();
-
-  RenderAllocator* getRenderAllocator(size_t device_id);
-  RenderAllocator* operator[](size_t device_id);
-
-  void setDataLayout(const std::shared_ptr<::QueryRenderer::QueryDataLayout>& query_data_layout);
-  void prepForRendering(const std::shared_ptr<::QueryRenderer::QueryDataLayout>& query_data_layout);
-
- private:
-  ::CudaMgr_Namespace::CudaMgr* cuda_mgr_;
-  ::QueryRenderer::QueryRenderManager* render_manager_;
-  std::vector<RenderAllocator> render_allocator_map_;
-};
+}  // namespace Data_Namespace
 
 CUdeviceptr alloc_gpu_mem(Data_Namespace::DataMgr* data_mgr,
                           const size_t num_bytes,
                           const int device_id,
                           RenderAllocator* render_allocator);
 
-Data_Namespace::AbstractBuffer* alloc_gpu_abstract_buffer(Data_Namespace::DataMgr* data_mgr,
-                                                          const size_t num_bytes,
-                                                          const int device_id);
+Data_Namespace::AbstractBuffer* alloc_gpu_abstract_buffer(
+    Data_Namespace::DataMgr* data_mgr,
+    const size_t num_bytes,
+    const int device_id);
 
-void free_gpu_abstract_buffer(Data_Namespace::DataMgr* data_mgr, Data_Namespace::AbstractBuffer* ab);
+void free_gpu_abstract_buffer(Data_Namespace::DataMgr* data_mgr,
+                              Data_Namespace::AbstractBuffer* ab);
 
 void copy_to_gpu(Data_Namespace::DataMgr* data_mgr,
                  CUdeviceptr dst,
@@ -138,18 +70,19 @@ struct GpuQueryMemory {
   std::pair<CUdeviceptr, CUdeviceptr> small_group_by_buffers;
 };
 
-struct QueryMemoryDescriptor;
+class QueryMemoryDescriptor;
 
-GpuQueryMemory create_dev_group_by_buffers(Data_Namespace::DataMgr* data_mgr,
-                                           const std::vector<int64_t*>& group_by_buffers,
-                                           const std::vector<int64_t*>& small_group_by_buffers,
-                                           const QueryMemoryDescriptor&,
-                                           const unsigned block_size_x,
-                                           const unsigned grid_size_x,
-                                           const int device_id,
-                                           const bool prepend_index_buffer,
-                                           const bool always_init_group_by_on_host,
-                                           RenderAllocator* render_allocator);
+GpuQueryMemory create_dev_group_by_buffers(
+    Data_Namespace::DataMgr* data_mgr,
+    const std::vector<int64_t*>& group_by_buffers,
+    const std::vector<int64_t*>& small_group_by_buffers,
+    const QueryMemoryDescriptor&,
+    const unsigned block_size_x,
+    const unsigned grid_size_x,
+    const int device_id,
+    const bool prepend_index_buffer,
+    const bool always_init_group_by_on_host,
+    RenderAllocator* render_allocator);
 
 void copy_group_by_buffers_from_gpu(Data_Namespace::DataMgr* data_mgr,
                                     const std::vector<int64_t*>& group_by_buffers,
@@ -162,10 +95,12 @@ void copy_group_by_buffers_from_gpu(Data_Namespace::DataMgr* data_mgr,
                                     const bool prepend_index_buffer);
 
 class QueryExecutionContext;
+struct RelAlgExecutionUnit;
 
 void copy_group_by_buffers_from_gpu(Data_Namespace::DataMgr* data_mgr,
                                     const QueryExecutionContext*,
                                     const GpuQueryMemory&,
+                                    const RelAlgExecutionUnit&,
                                     const unsigned block_size_x,
                                     const unsigned grid_size_x,
                                     const int device_id,

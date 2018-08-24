@@ -29,11 +29,27 @@
 #include <unordered_map>
 #include <vector>
 
-enum class ExtArgumentType { Int16, Int32, Int64, Float, Double, PInt16, PInt32, PInt64, PFloat, PDouble };
+enum class ExtArgumentType {
+  Int8,
+  Int16,
+  Int32,
+  Int64,
+  Float,
+  Double,
+  PInt8,
+  PInt16,
+  PInt32,
+  PInt64,
+  PFloat,
+  PDouble,
+  Bool
+};
 
 class ExtensionFunction {
  public:
-  ExtensionFunction(const std::string& name, const std::vector<ExtArgumentType>& args, const ExtArgumentType ret)
+  ExtensionFunction(const std::string& name,
+                    const std::vector<ExtArgumentType>& args,
+                    const ExtArgumentType ret)
       : name_(name), args_(args), ret_(ret) {}
 
   const std::string& getName() const { return name_; }

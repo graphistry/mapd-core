@@ -45,8 +45,7 @@ class IteratorTable {
                 const size_t groups_buffer_entry_count,
                 const std::vector<std::vector<const int8_t*>>& iter_buffers,
                 const ssize_t frag_id,
-                const ExecutorDeviceType device_type,
-                const int device_id);
+                const ExecutorDeviceType device_type);
 
   IteratorTable(const std::vector<TargetInfo>& targets,
                 const QueryMemoryDescriptor& query_mem_desc,
@@ -57,12 +56,14 @@ class IteratorTable {
   IteratorTable();
 
   void append(const IteratorTable& that) {
-    buffer_frags_.insert(buffer_frags_.end(), that.buffer_frags_.begin(), that.buffer_frags_.end());
+    buffer_frags_.insert(
+        buffer_frags_.end(), that.buffer_frags_.begin(), that.buffer_frags_.end());
   }
 
-  void fetchLazy(const std::vector<std::vector<const int8_t*>>& iter_buffers, const ssize_t frag_id);
+  void fetchLazy(const std::vector<std::vector<const int8_t*>>& iter_buffers,
+                 const ssize_t frag_id);
 
-  size_t colCount() const { return just_explain_ ? 1 : query_mem_desc_.agg_col_widths.size(); }
+  size_t colCount() const { return just_explain_ ? 1 : query_mem_desc_.getColCount(); }
 
   size_t fragCount() const { return buffer_frags_.size(); }
 
@@ -81,7 +82,9 @@ class IteratorTable {
     return targets_[col_idx].sql_type;
   }
 
-  bool definitelyHasNoRows() const { return buffer_frags_.empty() && !just_explain_ && !rowCount(); }
+  bool definitelyHasNoRows() const {
+    return buffer_frags_.empty() && !just_explain_ && !rowCount();
+  }
 
  private:
   void fuse(const IteratorTable& that);

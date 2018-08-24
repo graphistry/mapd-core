@@ -31,6 +31,10 @@ import org.slf4j.LoggerFactory;
  */
 public class MapDDriver implements java.sql.Driver {
 
+
+  static final int DriverMajorVersion = 2;
+  static final int DriverMinorVersion = 1;
+
   final static org.slf4j.Logger logger = LoggerFactory.getLogger(MapDDriver.class);
   public static final String PREFIX = "jdbc:mapd:";
 
@@ -74,12 +78,12 @@ public class MapDDriver implements java.sql.Driver {
 
   @Override
   public int getMajorVersion() {
-    return 0;
+    return DriverMajorVersion;
   }
 
   @Override
   public int getMinorVersion() {
-    return 1;
+    return DriverMinorVersion;
 
   }
 

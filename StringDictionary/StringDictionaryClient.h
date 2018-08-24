@@ -17,19 +17,24 @@
 #ifndef STRINGDICTIONARY_STRINGDICTIONARYCLIENT_H
 #define STRINGDICTIONARY_STRINGDICTIONARYCLIENT_H
 
-#include "../LeafHostInfo.h"
+#include "DictRef.h"
+#include "LeafHostInfo.h"
 
+#include <glog/logging.h>
 #include <memory>
 #include <mutex>
-#include <glog/logging.h>
 
 class StringDictionaryClient {
  public:
-  StringDictionaryClient(const LeafHostInfo& server_host, const int dict_id, const bool with_timeout) { CHECK(false); };
+  StringDictionaryClient(const LeafHostInfo& server_host,
+                         const DictRef dict_id,
+                         const bool with_timeout) {
+    CHECK(false);
+  };
 
-  void create(const int32_t dict_id, const int32_t db_id, const bool is_temp) { CHECK(false); };
+  void create(const DictRef dict_ref, const bool is_temp) { CHECK(false); };
 
-  void drop(const int32_t dict_id, const int32_t db_id) { CHECK(false); };
+  void drop(const DictRef dict_ref) { CHECK(false); };
 
   int32_t get(const std::string& str) {
     CHECK(false);
@@ -52,17 +57,29 @@ class StringDictionaryClient {
     return std::vector<int32_t>{};
   };
 
-  std::vector<int32_t> get_regexp_like(const std::string& pattern, const char escape, const int64_t generation) {
+  std::vector<int32_t> get_compare(const std::string& pattern,
+                                   const std::string& comp_operator,
+                                   const int64_t generation) {
     CHECK(false);
     return std::vector<int32_t>{};
   };
 
-  void get_or_add_bulk(std::vector<int32_t>& string_ids, const std::vector<std::string>& strings) { CHECK(false); };
+  std::vector<int32_t> get_regexp_like(const std::string& pattern,
+                                       const char escape,
+                                       const int64_t generation) {
+    CHECK(false);
+    return std::vector<int32_t>{};
+  };
+
+  void get_or_add_bulk(std::vector<int32_t>& string_ids,
+                       const std::vector<std::string>& strings) {
+    CHECK(false);
+  };
 
   void translate_string_ids(std::vector<int32_t>& dest_ids,
-                            const int32_t dest_dict_id,
+                            const DictRef dest_dict_ref,
                             const std::vector<int32_t>& source_ids,
-                            const int32_t source_dict_id,
+                            const DictRef source_dict_ref,
                             const int32_t dest_generation) {
     CHECK(false);
   };

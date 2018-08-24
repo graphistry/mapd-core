@@ -16,34 +16,36 @@
 
 #ifndef FIXED_LENGTH_ENCODER_H
 #define FIXED_LENGTH_ENCODER_H
-#include "Encoder.h"
-#include "AbstractBuffer.h"
-#include <stdexcept>
+#include <glog/logging.h>
 #include <iostream>
 #include <memory>
-#include <glog/logging.h>
+#include <stdexcept>
+#include "AbstractBuffer.h"
+#include "Encoder.h"
 
 template <typename T, typename V>
 class FixedLengthEncoder : public Encoder {
  public:
   FixedLengthEncoder(Data_Namespace::AbstractBuffer* buffer)
-      : Encoder(buffer),
-        dataMin(std::numeric_limits<T>::max()),
-        dataMax(std::numeric_limits<T>::min()),
-        has_nulls(false) {}
+      : Encoder(buffer)
+      , dataMin(std::numeric_limits<T>::max())
+      , dataMax(std::numeric_limits<T>::min())
+      , has_nulls(false) {}
 
-  ChunkMetadata appendData(int8_t*& srcData, const size_t numAppendElems) {
+  ChunkMetadata appendData(int8_t*& srcData,
+                           const size_t numAppendElems,
+                           const bool replicating = false) {
     T* unencodedData = reinterpret_cast<T*>(srcData);
     auto encodedData = std::unique_ptr<V[]>(new V[numAppendElems]);
     for (size_t i = 0; i < numAppendElems; ++i) {
-      // std::cout << "Unencoded: " << unencodedData[i] << std::endl;
-      // std::cout << "Min: " << dataMin << " Max: " <<  dataMax << std::endl;
-      encodedData.get()[i] = static_cast<V>(unencodedData[i]);
-      if (unencodedData[i] != encodedData.get()[i]) {
-        LOG(ERROR) << "Fixed encoding failed, Unencoded: " + std::to_string(unencodedData[i]) + " encoded: " +
-                          std::to_string(encodedData.get()[i]);
+      size_t ri = replicating ? 0 : i;
+      encodedData.get()[ri] = static_cast<V>(unencodedData[ri]);
+      if (unencodedData[ri] != encodedData.get()[ri]) {
+        LOG(ERROR) << "Fixed encoding failed, Unencoded: " +
+                          std::to_string(unencodedData[ri]) +
+                          " encoded: " + std::to_string(encodedData.get()[ri]);
       } else {
-        T data = unencodedData[i];
+        T data = unencodedData[ri];
         if (data == std::numeric_limits<V>::min())
           has_nulls = true;
         else {
@@ -58,7 +60,8 @@ class FixedLengthEncoder : public Encoder {
     buffer_->append((int8_t*)(encodedData.get()), numAppendElems * sizeof(V));
     ChunkMetadata chunkMetadata;
     getMetadata(chunkMetadata);
-    srcData += numAppendElems * sizeof(T);
+    if (!replicating)
+      srcData += numAppendElems * sizeof(T);
     return chunkMetadata;
   }
 
@@ -108,7 +111,8 @@ class FixedLengthEncoder : public Encoder {
 
   void copyMetadata(const Encoder* copyFromEncoder) {
     numElems = copyFromEncoder->numElems;
-    auto castedEncoder = reinterpret_cast<const FixedLengthEncoder<T, V>*>(copyFromEncoder);
+    auto castedEncoder =
+        reinterpret_cast<const FixedLengthEncoder<T, V>*>(copyFromEncoder);
     dataMin = castedEncoder->dataMin;
     dataMax = castedEncoder->dataMax;
     has_nulls = castedEncoder->has_nulls;

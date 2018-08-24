@@ -22,10 +22,13 @@
 #ifndef _ABSTRACT_FRAGMENTER_H
 #define _ABSTRACT_FRAGMENTER_H
 
-#include "../Shared/sqltypes.h"
-#include "Fragmenter.h"
-#include <vector>
+#include <boost/variant.hpp>
 #include <string>
+#include <vector>
+#include "../Shared/UpdelRoll.h"
+#include "../Shared/sqltypes.h"
+#include "../StringDictionary/StringDictionary.h"
+#include "Fragmenter.h"
 
 // Should the ColumnInfo and FragmentInfo structs be in
 // AbstractFragmenter?
@@ -33,10 +36,21 @@
 namespace Data_Namespace {
 class AbstractBuffer;
 class AbstractDataMgr;
+};  // namespace Data_Namespace
+
+namespace Importer_NS {
+class TypedImportBuffer;
 };
 
-namespace Fragmenter_Namespace {
+namespace Catalog_Namespace {
+class Catalog;
+}
+struct TableDescriptor;
+struct ColumnDescriptor;
 
+namespace Fragmenter_Namespace {
+using NullableString = boost::variant<std::string, void*>;
+using ScalarTargetValue = boost::variant<int64_t, double, float, NullableString>;
 /*
  * @type AbstractFragmenter
  * @brief abstract base class for all table partitioners
@@ -60,7 +74,8 @@ class AbstractFragmenter {
    * keeps. May also prune the predicate.
    */
 
-  // virtual void getFragmentsForQuery(QueryInfo &queryInfo, const void *predicate = 0) = 0;
+  // virtual void getFragmentsForQuery(QueryInfo &queryInfo, const void *predicate = 0) =
+  // 0;
   virtual TableInfo getFragmentsForQuery() = 0;
 
   /**
@@ -69,7 +84,7 @@ class AbstractFragmenter {
    * with locks and checkpoints
    */
 
-  virtual void insertData(const InsertData& insertDataStruct) = 0;
+  virtual void insertData(InsertData& insertDataStruct) = 0;
 
   /**
    * @brief Given data wrapped in an InsertData struct,
@@ -77,7 +92,7 @@ class AbstractFragmenter {
    * No locks and checkpoints taken needs to be managed externally
    */
 
-  virtual void insertDataNoCheckpoint(const InsertData& insertDataStruct) = 0;
+  virtual void insertDataNoCheckpoint(InsertData& insertDataStruct) = 0;
 
   /**
    * @brief Will truncate table to less than maxRows by dropping
@@ -97,8 +112,45 @@ class AbstractFragmenter {
    */
 
   virtual std::string getFragmenterType() = 0;
+
+  virtual size_t getNumRows() = 0;
+
+  virtual void updateColumn(const Catalog_Namespace::Catalog* catalog,
+                            const TableDescriptor* td,
+                            const ColumnDescriptor* cd,
+                            const int fragmentId,
+                            const std::vector<uint64_t>& fragOffsets,
+                            const std::vector<ScalarTargetValue>& rhsValues,
+                            const SQLTypeInfo& rhsType,
+                            const Data_Namespace::MemoryLevel memoryLevel,
+                            UpdelRoll& updelRoll) = 0;
+
+  virtual void updateColumn(const Catalog_Namespace::Catalog* catalog,
+                            const TableDescriptor* td,
+                            const ColumnDescriptor* cd,
+                            const int fragmentId,
+                            const std::vector<uint64_t>& fragOffsets,
+                            const ScalarTargetValue& rhsValue,
+                            const SQLTypeInfo& rhsType,
+                            const Data_Namespace::MemoryLevel memoryLevel,
+                            UpdelRoll& updelRoll) = 0;
+
+  virtual void updateColumnMetadata(const ColumnDescriptor* cd,
+                                    FragmentInfo& fragment,
+                                    std::shared_ptr<Chunk_NS::Chunk> chunk,
+                                    const bool null,
+                                    const double dmax,
+                                    const double dmin,
+                                    const int64_t lmax,
+                                    const int64_t lmin,
+                                    const SQLTypeInfo& rhsType,
+                                    UpdelRoll& updelRoll) = 0;
+
+  virtual void updateMetadata(const Catalog_Namespace::Catalog* catalog,
+                              const MetaDataKey& key,
+                              UpdelRoll& updelRoll) = 0;
 };
 
-}  // Fragmenter_Namespace
+}  // namespace Fragmenter_Namespace
 
 #endif  // _ABSTRACT_FRAGMENTER_H
